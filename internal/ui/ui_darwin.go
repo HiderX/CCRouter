@@ -597,7 +597,13 @@ func (a *application) settings(x, y float64) {
 	}
 	a.menuItem(m, "打开数据目录", func() { go func() { _ = exec.Command("/usr/bin/open", a.s.Root).Run() }() })
 	a.menuItem(m, "关于 CCRouter", func() {
-		a.alert("CCRouter 0.1", "Go · 原生 AppKit\n按对话绑定账户，Claude 直接发送请求。\n\n额度为服务器窗口用量；Token 统计仅覆盖本机已记录会话。\nIP 为独立探测结果，分流时可能与 Claude 出口不同。")
+		title := "CCRouter"
+		// The version comes from the app bundle's Info.plist; a bare binary has none.
+		if v := foundation.Bundle_MainBundle().ObjectForInfoDictionaryKey("CFBundleShortVersionString"); !v.IsNil() {
+			version := foundation.StringFrom(v.Ptr())
+			title += " " + version.String()
+		}
+		a.alert(title, "Go · 原生 AppKit\n按对话绑定账户，Claude 直接发送请求。\n\n额度为服务器窗口用量；Token 统计仅覆盖本机已记录会话。\nIP 为独立探测结果，分流时可能与 Claude 出口不同。")
 	})
 	a.popUp(m, x, y)
 }

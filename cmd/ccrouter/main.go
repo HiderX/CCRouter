@@ -17,7 +17,7 @@ import (
 	"ccrouter/internal/usage"
 )
 
-const version = "0.1.0"
+const version = "0.1.1"
 
 func main() {
 	if e := run(os.Args[1:]); e != nil {

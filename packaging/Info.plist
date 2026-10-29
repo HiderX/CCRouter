@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>CCRouter</string>
+<key>CFBundleDisplayName</key><string>CCRouter</string>
+<key>CFBundleIdentifier</key><string>app.ccrouter.menubar</string>
+<key>CFBundleExecutable</key><string>ccrouter-tray</string>
+<key>CFBundleIconFile</key><string>CCRouter</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>LSUIElement</key><true/>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSAppleEventsUsageDescription</key><string>在 Terminal 中使用所选账户启动或恢复 Claude 会话。</string>
+</dict></plist>

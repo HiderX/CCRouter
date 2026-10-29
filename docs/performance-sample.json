@@ -1,0 +1,11 @@
+{
+  "arch": "arm64",
+  "go_heap_bytes": 2820192,
+  "go_version": "go1.27.3",
+  "goroutines": 3,
+  "idle_cpu_percent": 0.014039355712865546,
+  "idle_seconds": 10.01469575,
+  "mode": "isolated demo; 24 disclosure actions and 6 reopen cycles, panel closed",
+  "os": "darwin",
+  "rss_bytes": 83542016
+}

@@ -1,0 +1,14 @@
+/dist/
+/.cache/
+/.local/
+*.test
+*.prof
+.DS_Store
+
+# Early design studies and reference art stay local; only the images the README and
+# docs use are published.
+designs/*
+!designs/native-*-preview.png
+!designs/icon/
+designs/icon/*
+!designs/icon/ccrouter.png

@@ -37,7 +37,7 @@ func (r *Reader) Quota(ctx context.Context, a store.Account, force bool) Result 
 	if force {
 		gap = forcedRun
 	}
-	if (force || !ok || time.Since(at) > quotaFresh) && time.Since(r.lastRun[a.ID]) > gap {
+	if (force || !ok || time.Since(at) > quotaFresh || q.passed()) && time.Since(r.lastRun[a.ID]) > gap {
 		if !session.LoggedIn(a.Profile) {
 			return Result{Quota: q, Updated: at, Error: "该账户尚未登录"}
 		}
@@ -55,6 +55,16 @@ func (r *Reader) Quota(ctx context.Context, a store.Account, force bool) Result 
 		out.Error = r.lastError[a.ID] // a stale reading says why it could not be renewed
 	}
 	return out
+}
+
+// passed reports whether a window has reset since the reading, which makes it out of date.
+func (q Quota) passed() bool {
+	for _, w := range []*Window{q.FiveHour, q.SevenDay} {
+		if w != nil && w.ResetsAt != nil && !w.ResetsAt.After(time.Now()) {
+			return true
+		}
+	}
+	return false
 }
 
 // configFile is where Claude keeps a profile's account state and usage cache.

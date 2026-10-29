@@ -3,9 +3,11 @@ package ui
 import (
 	"fmt"
 	"math"
+	"time"
 
 	"ccrouter/internal/status"
 	"ccrouter/internal/store"
+	"ccrouter/internal/usage"
 	"github.com/progrium/darwinkit/helper/action"
 	"github.com/progrium/darwinkit/macos/appkit"
 	"github.com/progrium/darwinkit/macos/foundation"
@@ -79,7 +81,6 @@ func (c *canvas) text(s string, st style, x, cy float64, align appkit.TextAlignm
 	w := math.Ceil(size.Width) - 4
 	if max > 0 && w > max {
 		w = max
-		l.SetToolTip(s)
 	}
 	switch align {
 	case appkit.TextAlignmentRight:
@@ -102,22 +103,17 @@ func (c *canvas) glyph(name string, size float64, weight appkit.FontWeight, colo
 	c.place(v.View, cx-s.Width/2, cy-s.Height/2, s.Width, s.Height)
 }
 
-// hit is an invisible click target laid over the drawn content of a row or icon.
-func (c *canvas) hit(x, y, w, h float64, tip string, fn func()) appkit.Button {
+// hit is an invisible click target laid over the drawn content of a row or icon. The label
+// is for VoiceOver only; nothing appears on hover.
+func (c *canvas) hit(x, y, w, h float64, label string, fn func()) appkit.Button {
 	b := appkit.NewButtonWithFrame(rect(0, 0, w, h))
 	b.SetTitle("")
 	b.SetBordered(false)
 	b.SetTransparent(true)
-	b.SetToolTip(tip)
-	objc.Call[objc.Void](b, objc.Sel("setAccessibilityLabel:"), tip)
+	objc.Call[objc.Void](b, objc.Sel("setAccessibilityLabel:"), label)
 	action.Set(b, func(objc.Object) { fn() })
 	c.place(b.View, x, y, w, h)
 	return b
-}
-func (c *canvas) tip(x, y, w, h float64, tip string) {
-	v := appkit.NewViewWithFrame(rect(0, 0, w, h))
-	v.SetToolTip(tip)
-	c.place(v, x, y, w, h)
 }
 func (c *canvas) fill(x, y, w, h, r float64, color appkit.Color) int {
 	v := appkit.NewViewWithFrame(rect(0, 0, w, h))
@@ -221,7 +217,7 @@ func (a *application) header(c *canvas) float64 {
 	// Exit IP accessory between the title and the refresh button. If country and address do
 	// not both fit, the address alone is shown; it is truncated only past that (long IPv6).
 	st := style{11, appkit.FontWeightRegular, primary, false}
-	labels, tip := a.exitText()
+	labels := a.exitText()
 	room := 234 - 8 - (inset + title) - 33
 	shown := labels[len(labels)-1]
 	for _, l := range labels {
@@ -239,7 +235,7 @@ func (a *application) header(c *canvas) float64 {
 	c.capsule(x, 22, w, 24)
 	c.glyph("globe", 12, appkit.FontWeightRegular, secondary, x+14, 34)
 	c.text(shown, st, x+24, 34, appkit.TextAlignmentLeft, tw)
-	c.hit(x, 22, w, 24, tip, a.copyIP)
+	c.hit(x, 22, w, 24, "复制出口 IP", a.copyIP)
 	c.hline(60)
 	return 60
 }
@@ -276,17 +272,16 @@ func (a *application) usage(c *canvas, y float64) float64 {
 		rate = fmt.Sprintf("%.0f%%", t.HitRate())
 	}
 	metrics := []struct {
-		x, w             float64
-		name, value, tip string
+		x, w        float64
+		name, value string
 	}{
-		{inset, 78, "总 tokens", compact(t.Total()), "未缓存输入 + 输出 + 缓存读取 + 缓存写入"},
-		{112, 64, "请求数", compact(t.Requests), "去重后的已记录助手消息数"},
-		{192, 70, "输入缓存命中", rate, "缓存读取 ÷ 全部输入 tokens"},
+		{inset, 78, "总 tokens", compact(t.Total())},
+		{112, 64, "请求数", compact(t.Requests)},
+		{192, 70, "输入缓存命中", rate},
 	}
 	for _, m := range metrics {
 		c.text(m.name, style{11, appkit.FontWeightRegular, primary, false}, m.x, y+44.5, appkit.TextAlignmentLeft, m.w)
 		c.text(m.value, style{17, appkit.FontWeightSemibold, primary, true}, m.x, y+64, appkit.TextAlignmentLeft, m.w)
-		c.tip(m.x, y+36, m.w, 40, m.tip)
 	}
 	c.vline(100, y+37, 37)
 	c.vline(180, y+37, 37)
@@ -338,9 +333,10 @@ func (a *application) account(c *canvas, ac store.Account, y float64, first, las
 	open := a.expanded[ac.ID]
 	q := a.quotas[ac.ID]
 	h := 60.0
+	notice, warn := quotaNotice(q)
 	if open {
-		h = 102
-		if q.Error != "" {
+		h = 128
+		if notice != "" {
 			h += 18
 		}
 		// Layer corners use AppKit's bottom-left origin: MinY is the bottom edge.
@@ -394,19 +390,23 @@ func (a *application) account(c *canvas, ac store.Account, y float64, first, las
 		}
 		room := edge - column - measure(action, small) - 12
 		c.text(email, style{12, appkit.FontWeightRegular, secondary, false}, column, y+40, appkit.TextAlignmentLeft, room)
-		c.quota("5 小时", q.Quota.FiveHour, y+63)
-		c.quota("本周", q.Quota.SevenDay, y+83)
-		if q.Error != "" {
-			c.text(q.Error, style{11, appkit.FontWeightRegular, appkit.Color_SystemOrangeColor(), false}, column, y+103, appkit.TextAlignmentLeft, edge-column)
+		now := time.Now()
+		c.quota("5 小时", q.Quota.FiveHour, y+63, now)
+		c.quota("本周", q.Quota.SevenDay, y+97, now)
+		if notice != "" {
+			color := appkit.Color_SecondaryLabelColor()
+			if warn {
+				color = appkit.Color_SystemOrangeColor()
+			}
+			c.text(notice, style{11, appkit.FontWeightRegular, color, false}, column, y+131, appkit.TextAlignmentLeft, edge-column)
 		}
 	}
 
 	// The whole block toggles; "设为默认" is the only nested action, so it is placed on top.
-	row := c.hit(8, y, panelWidth-16, h, "展开或折叠账户", func() {
+	c.hit(8, y, panelWidth-16, h, "展开或折叠账户", func() {
 		a.expanded[ac.ID] = !open
 		a.render()
 	})
-	row.SetToolTip(rowTip(open, q))
 	switch {
 	case open && ac.Default:
 		c.text("新对话默认", small, edge, y+40, appkit.TextAlignmentRight, 0)
@@ -416,37 +416,40 @@ func (a *application) account(c *canvas, ac store.Account, y float64, first, las
 	}
 	return y + h
 }
-func (c *canvas) quota(title string, w *status.Window, cy float64) {
+
+// quota draws one window: label, bar and percentage, with the time to its reset below.
+// Once the reset has passed, the reading no longer applies until Claude refreshes it.
+func (c *canvas) quota(title string, w *status.Window, cy float64, now time.Time) {
 	secondary := appkit.Color_SecondaryLabelColor()
 	c.text(title, style{11, appkit.FontWeightRegular, secondary, false}, column, cy, appkit.TextAlignmentLeft, 0)
 	c.fill(94, cy-1.5, 130, 3, 1.5, appkit.Color_QuaternaryLabelColor())
-	text := "—"
+	text, reset := "—", ""
 	if w != nil {
-		text = fmt.Sprintf("%.0f%%", w.Utilization)
-		c.fill(94, cy-1.5, 130*math.Min(100, math.Max(0, w.Utilization))/100, 3, 1.5, c.accent())
-	}
-	c.text(text, style{11, appkit.FontWeightRegular, secondary, true}, edge, cy, appkit.TextAlignmentRight, 0)
-}
-
-// rowTip carries the quota reset times, since the row button covers the quota lines.
-func rowTip(open bool, q status.Result) string {
-	if !open {
-		return "点击展开额度"
-	}
-	tip := "点击收起"
-	for _, v := range []struct {
-		name string
-		w    *status.Window
-	}{{"5 小时", q.Quota.FiveHour}, {"本周", q.Quota.SevenDay}} {
-		if v.w != nil && v.w.ResetsAt != nil {
-			tip += "\n" + v.name + "窗口重置于 " + v.w.ResetsAt.Local().Format("01-02 15:04")
+		reset = resetIn(w.ResetsAt, now)
+		if reset == "已重置" {
+			reset = "已重置，等待刷新"
+		} else {
+			text = fmt.Sprintf("%.0f%%", w.Utilization)
+			c.fill(94, cy-1.5, 130*math.Min(100, math.Max(0, w.Utilization))/100, 3, 1.5, c.accent())
 		}
 	}
-	if !q.Updated.IsZero() {
-		tip += "\n额度更新于 " + q.Updated.Local().Format("15:04")
+	c.text(text, style{11, appkit.FontWeightRegular, secondary, true}, edge, cy, appkit.TextAlignmentRight, 0)
+	if reset != "" {
+		c.text(reset, style{10, appkit.FontWeightRegular, appkit.Color_TertiaryLabelColor(), false}, 94, cy+14, appkit.TextAlignmentLeft, edge-94)
 	}
-	return tip
 }
+
+// quotaNotice is shown under an expanded account: an error, or the age of a stale reading.
+func quotaNotice(q status.Result) (string, bool) {
+	switch {
+	case q.Error != "":
+		return q.Error, true
+	case !q.Updated.IsZero() && time.Since(q.Updated) > 10*time.Minute:
+		return "额度数据更新于 " + usage.When(q.Updated), false
+	}
+	return "", false
+}
+
 func (a *application) emptyAccounts(c *canvas, y float64) float64 {
 	c.text("还没有账户", style{13, appkit.FontWeightSemibold, appkit.Color_LabelColor(), false}, inset, y+24, appkit.TextAlignmentLeft, 0)
 	c.text("添加新账户，或导入当前 Claude 登录。", style{11, appkit.FontWeightRegular, appkit.Color_SecondaryLabelColor(), false}, inset, y+44, appkit.TextAlignmentLeft, edge-inset)
@@ -467,7 +470,6 @@ func (a *application) footer(c *canvas, y float64) float64 {
 	y += 4
 	c.glyph("lock.fill", 13, appkit.FontWeightRegular, primary, 26, y+22)
 	c.text("续聊沿用原账户", style{12, appkit.FontWeightRegular, secondary, false}, column, y+22, appkit.TextAlignmentLeft, 0)
-	c.tip(8, y, panelWidth-16, 40, "对话按 ID 绑定账户：恢复时始终使用原账户，切换默认账户只影响新对话。")
 	y += 40
 	c.hline(y)
 
@@ -557,14 +559,16 @@ func quotaSummary(q status.Result) string {
 		}
 		return "额度待刷新"
 	}
-	s := "5 小时 —"
-	if q.Quota.FiveHour != nil {
-		s = fmt.Sprintf("5 小时 %.0f%%", q.Quota.FiveHour.Utilization)
+	part := func(name string, w *status.Window) string {
+		switch {
+		case w == nil:
+			return name + " —"
+		case resetIn(w.ResetsAt, time.Now()) == "已重置":
+			return name + " 已重置"
+		}
+		return fmt.Sprintf("%s %.0f%%", name, w.Utilization)
 	}
-	if q.Quota.SevenDay != nil {
-		s += fmt.Sprintf(" · 本周 %.0f%%", q.Quota.SevenDay.Utilization)
-	}
-	return s
+	return part("5 小时", q.Quota.FiveHour) + " · " + part("本周", q.Quota.SevenDay)
 }
 
 // DarwinKit's NSArray-to-slice conversion has an uninitialized length for an empty

@@ -123,7 +123,7 @@ Other commands:
 ## Menu bar panel
 
 - **Usage:** total tokens, requests and input cache hit rate, a one-hour trend, and a breakdown of cache reads, cache writes, uncached input and output. Click 今日 (Today) to cycle through today, the last 7 days and all time.
-- **Accounts:** click anywhere on an account to show its email and quota bars. On an expanded account, 设为默认 (Set as default) makes it the default for new conversations. The ✓ marks the current default.
+- **Accounts:** click anywhere on an account to show its email and quota bars, each with the time left until it resets. On an expanded account, 设为默认 (Set as default) makes it the default for new conversations. The ✓ marks the current default.
 - **Exit IP:** the address and country your traffic leaves from. Click to copy.
 - **最近对话 (Recent conversations):** resume one of your latest conversations in Terminal, on its account, or start 新对话… (New conversation) in a folder you choose.
 - **Gear menu:** import `~/.claude`, rename an account, log in again, refresh account details, or open the data folder.

@@ -42,7 +42,8 @@ type application struct {
 	notice      string
 	ipTime      time.Time
 	copied      bool
-	dark        bool // appearance used by the last render
+	dark        bool          // appearance used by the last render
+	clock       chan struct{} // closed to stop the per-minute redraw
 	refreshing  bool
 	content     appkit.View // current document view; menus anchor in its coordinates
 	height      float64
@@ -74,7 +75,6 @@ func Run(s *store.Store, demo bool) error {
 		a.item = appkit.StatusBar_SystemStatusBar().StatusItemWithLength(28)
 		a.item.Retain()
 		a.item.Button().SetImage(icon.MenuBar())
-		a.item.Button().SetToolTip("CCRouter · 续聊沿用原账户")
 		a.pop = appkit.NewPopover()
 		a.pop.Retain()
 		a.pop.SetBehavior(appkit.PopoverBehaviorTransient)
@@ -83,6 +83,7 @@ func Run(s *store.Store, demo bool) error {
 		a.pop.SetContentViewController(a.controller)
 		popoverDelegate := &appkit.PopoverDelegate{}
 		popoverDelegate.SetPopoverDidClose(func(foundation.Notification) {
+			a.stopClock()
 			a.controller.SetView(appkit.NewViewWithFrame(rect(0, 0, panelWidth, 1)))
 		})
 		a.pop.SetDelegate(popoverDelegate)
@@ -118,9 +119,42 @@ func (a *application) show() {
 	if isDark(a.pop.EffectiveAppearance()) != a.dark {
 		a.render()
 	}
+	a.startClock()
 	if !a.demo {
 		a.refreshLocal()
 		a.refreshRemote(false)
+	}
+}
+
+// startClock redraws the open panel every minute so reset countdowns stay current.
+// Nothing runs while the panel is closed.
+func (a *application) startClock() {
+	if a.clock != nil {
+		return
+	}
+	done := make(chan struct{})
+	a.clock = done
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				mainThread(func() {
+					if a.pop.IsShown() {
+						a.render()
+					}
+				})
+			case <-done:
+				return
+			}
+		}
+	}()
+}
+func (a *application) stopClock() {
+	if a.clock != nil {
+		close(a.clock)
+		a.clock = nil
 	}
 }
 func (a *application) restartWatch() {
@@ -251,7 +285,8 @@ func (a *application) seedDemo() {
 		a.data.Accounts = append(a.data.Accounts, ac)
 		factor := []int64{3, 2, 1}[i]
 		a.data.ByAccount[id] = store.Totals{Input: 40000 * factor, Output: 20000 * factor, CacheRead: 300000 * factor, CacheWrite: 40000 * factor, Requests: 26 * factor}
-		a.quotas[id] = status.Result{Quota: status.Quota{FiveHour: &status.Window{Utilization: []float64{32, 68, 12}[i]}, SevenDay: &status.Window{Utilization: []float64{54, 41, 22}[i]}}, Updated: time.Now()}
+		five, week := time.Now().Add([]time.Duration{135, 48, 260}[i]*time.Minute), time.Now().Add([]time.Duration{76, 30, 140}[i]*time.Hour)
+		a.quotas[id] = status.Result{Quota: status.Quota{FiveHour: &status.Window{Utilization: []float64{32, 68, 12}[i], ResetsAt: &five}, SevenDay: &status.Window{Utilization: []float64{54, 41, 22}[i], ResetsAt: &week}}, Updated: time.Now()}
 	}
 	a.expanded["0"] = true
 	a.data.Total = store.Totals{Input: 240000, Output: 120000, CacheRead: 1800000, CacheWrite: 240000, Requests: 156}
@@ -281,21 +316,17 @@ func (a *application) refreshAll() {
 }
 
 // exitText lists labels from most to least detailed; the header shows the first that fits.
-func (a *application) exitText() (labels []string, tip string) {
+func (a *application) exitText() []string {
 	switch {
 	case a.exit.IP != "":
-		labels, tip = []string{a.exit.IP}, a.exit.IP
 		if r := region(a.exit.Country); r != "" {
-			labels = []string{r + " · " + a.exit.IP, a.exit.IP}
-			tip = labels[0]
+			return []string{r + " · " + a.exit.IP, a.exit.IP}
 		}
-		tip += "\n点击复制。此 IP 为 ipify 探测结果，分流规则可能使 Claude 的实际出口不同。\n探测于 " + a.ipTime.Local().Format("15:04")
+		return []string{a.exit.IP}
 	case a.ipErr != "":
-		labels, tip = []string{"IP 查询失败"}, a.ipErr+"，点击重试。"
-	default:
-		labels, tip = []string{"查询出口 IP"}, "点击查询出口 IP"
+		return []string{"IP 查询失败"}
 	}
-	return
+	return []string{"查询出口 IP"}
 }
 func (a *application) copyIP() {
 	if a.exit.IP == "" {
@@ -500,7 +531,6 @@ func (a *application) recent(x, y float64) {
 		} else {
 			i.SetTitle(title + " — " + detail)
 		}
-		i.SetToolTip(s.CWD + "\n" + s.ID)
 	}
 	if shown == 0 {
 		a.menuItem(m, "暂无可恢复的对话", nil)

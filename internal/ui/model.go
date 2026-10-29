@@ -93,6 +93,31 @@ func region(code string) string {
 	return code
 }
 
+// resetIn says when a quota window resets: 25 分钟后重置, 2 小时 15 分后重置, 3 天 4 小时后重置.
+// It returns "" when the reset time is unknown, and 已重置 once it has passed.
+func resetIn(at *time.Time, now time.Time) string {
+	if at == nil {
+		return ""
+	}
+	d := at.Sub(now)
+	switch m := int(d.Minutes()); {
+	case d <= 0:
+		return "已重置"
+	case m < 1:
+		return "即将重置"
+	case m < 60:
+		return fmt.Sprintf("%d 分钟后重置", m)
+	case m < 24*60 && m%60 == 0:
+		return fmt.Sprintf("%d 小时后重置", m/60)
+	case m < 24*60:
+		return fmt.Sprintf("%d 小时 %d 分后重置", m/60, m%60)
+	case m/60%24 == 0:
+		return fmt.Sprintf("%d 天后重置", m/(24*60))
+	default:
+		return fmt.Sprintf("%d 天 %d 小时后重置", m/(24*60), m/60%24)
+	}
+}
+
 // planLabel turns Claude's subscriptionType (max, pro, team…) into a badge title.
 func planLabel(p string) string {
 	if p == "" {

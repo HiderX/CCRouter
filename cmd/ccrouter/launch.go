@@ -71,6 +71,12 @@ func start(s *store.Store, account, target string, args []string, cwd string) er
 	var e error
 	if target != "" {
 		p, e = session.PrepareSwitch(s, target, args, cwd)
+		// A switch the scheduler chose must not cost the resume itself.
+		if e != nil && assigned {
+			notice = fmt.Sprintf("CCRouter · 自动换号未完成（%v），仍用原账户恢复", e)
+			target, assigned = "", false
+			p, e = session.Prepare(s, account, args, cwd)
+		}
 	} else {
 		p, e = session.Prepare(s, account, args, cwd)
 	}

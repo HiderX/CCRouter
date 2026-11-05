@@ -57,6 +57,16 @@ func (r *Reader) Quota(ctx context.Context, a store.Account, force bool) Result 
 	return out
 }
 
+// Cached is the reading Claude last cached for a, without starting Claude. A launch
+// decides with it, so it never waits for a refresh.
+func Cached(a store.Account) Result {
+	q, at, ok := readCache(a.Profile)
+	if !ok {
+		return Result{Error: "额度暂不可用"}
+	}
+	return Result{Quota: q, Updated: at}
+}
+
 // passed reports whether a window has reset since the reading, which makes it out of date.
 func (q Quota) passed() bool {
 	for _, w := range []*Window{q.FiveHour, q.SevenDay} {

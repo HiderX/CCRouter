@@ -174,6 +174,20 @@ func (s *Store) SetDefault(id string) error {
 	return e
 }
 
+// Setting reads one stored setting; a missing one is "".
+func (s *Store) Setting(key string) (string, error) {
+	var v string
+	e := s.DB.QueryRow(`SELECT value FROM settings WHERE key=?`, key).Scan(&v)
+	if errors.Is(e, sql.ErrNoRows) {
+		return "", nil
+	}
+	return v, e
+}
+func (s *Store) SetSetting(key, value string) error {
+	_, e := s.DB.Exec(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+	return e
+}
+
 // RenameAccount changes only the display name; profiles, credentials and bindings use the ID.
 func (s *Store) RenameAccount(id, name string) error {
 	name = strings.TrimSpace(name)

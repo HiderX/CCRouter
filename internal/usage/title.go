@@ -18,15 +18,9 @@ const titleChunk = 256 << 10
 // Title returns Claude's own title for a conversation, falling back to its first prompt.
 // The transcript is read on demand for display only; nothing is stored.
 func Title(profile, cwd, id string) string {
-	f, e := os.Open(filepath.Join(profile, "projects", projectDir(cwd), id+".jsonl"))
+	f, e := os.Open(Transcript(profile, cwd, id))
 	if e != nil {
-		matches, _ := filepath.Glob(filepath.Join(profile, "projects", "*", id+".jsonl"))
-		if len(matches) == 0 {
-			return ""
-		}
-		if f, e = os.Open(matches[0]); e != nil {
-			return ""
-		}
+		return ""
 	}
 	defer f.Close()
 	// Claude appends a fresh ai-title as the conversation evolves; the newest is near the end.
@@ -40,6 +34,25 @@ func Title(profile, cwd, id string) string {
 		return ai
 	}
 	return prompt
+}
+
+// TranscriptPath is where Claude keeps conversation id when it runs in cwd.
+func TranscriptPath(profile, cwd, id string) string {
+	return filepath.Join(profile, "projects", projectDir(cwd), id+".jsonl")
+}
+
+// Transcript finds conversation id's record, looking in other project directories when
+// the conversation is not filed under cwd. It returns "" when there is none.
+func Transcript(profile, cwd, id string) string {
+	p := TranscriptPath(profile, cwd, id)
+	if _, e := os.Stat(p); e == nil {
+		return p
+	}
+	matches, _ := filepath.Glob(filepath.Join(profile, "projects", "*", id+".jsonl"))
+	if len(matches) == 0 {
+		return ""
+	}
+	return matches[0]
 }
 
 // When formats a conversation's last activity: 今天 15:04, 昨天 15:04, or 01-02 15:04.

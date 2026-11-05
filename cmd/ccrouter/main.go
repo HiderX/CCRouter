@@ -52,12 +52,12 @@ func run(args []string) error {
 	switch args[0] {
 	case "run":
 		// The non-interactive form the menu bar uses: default account, no picker.
-		account, rest := splitAccount(args[1:])
+		account, target, rest := splitAccount(args[1:])
 		cwd, e := os.Getwd()
 		if e != nil {
 			return e
 		}
-		return start(s, account, rest, cwd)
+		return start(s, account, target, rest, cwd)
 	case "account":
 		return accounts(s, args[1:])
 	case "sessions":
@@ -233,6 +233,8 @@ ccrouter --resume [搜索词]        从所有账户的对话中选择并恢复�
 ccrouter --resume 对话UUID        用该对话原账户恢复
 ccrouter -c                       恢复当前目录最近的已绑定对话
 ccrouter --account 名称 [参数]    跳过选择，指定新对话的账户
+ccrouter --resume|-c --switch-account 名称
+                                  把该对话转到另一个账户继续（缓存重新建立）
 
 管理：
 ccrouter gui                      打开 macOS 菜单栏面板

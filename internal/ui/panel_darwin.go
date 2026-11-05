@@ -468,8 +468,17 @@ func (a *application) footer(c *canvas, y float64) float64 {
 	primary, secondary := appkit.Color_LabelColor(), appkit.Color_SecondaryLabelColor()
 	c.hline(y + 4)
 	y += 4
-	c.glyph("lock.fill", 13, appkit.FontWeightRegular, primary, 26, y+22)
-	c.text("续聊沿用原账户", style{12, appkit.FontWeightRegular, secondary, false}, column, y+22, appkit.TextAlignmentLeft, 0)
+	// With one account a resume can only use it; with more, the row offers to switch.
+	if len(a.data.Accounts) > 1 {
+		c.glyph("arrow.left.arrow.right", 13, appkit.FontWeightRegular, primary, 26, y+22)
+		c.text("换账户继续", style{12, appkit.FontWeightRegular, primary, false}, column, y+22, appkit.TextAlignmentLeft, 0)
+		c.glyph("chevron.right", 11, appkit.FontWeightSemibold, primary, edge-5, y+22)
+		below := y + 38
+		c.hit(8, y+5, panelWidth-16, 34, "换账户继续对话", func() { a.switchAccount(inset, below) })
+	} else {
+		c.glyph("lock.fill", 13, appkit.FontWeightRegular, primary, 26, y+22)
+		c.text("续聊沿用原账户", style{12, appkit.FontWeightRegular, secondary, false}, column, y+22, appkit.TextAlignmentLeft, 0)
+	}
 	y += 40
 	c.hline(y)
 

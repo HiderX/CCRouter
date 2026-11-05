@@ -6,12 +6,19 @@ import (
 )
 
 func TestSplitAccount(t *testing.T) {
-	a, rest := splitAccount([]string{"--model", "opus", "--account", "工作", "fix", "--", "--account", "x"})
+	a, _, rest := splitAccount([]string{"--model", "opus", "--account", "工作", "fix", "--", "--account", "x"})
 	if a != "工作" || !reflect.DeepEqual(rest, []string{"--model", "opus", "fix", "--", "--account", "x"}) {
 		t.Fatal(a, rest)
 	}
-	if a, _ = splitAccount([]string{"--account=个人"}); a != "个人" {
+	if a, _, _ = splitAccount([]string{"--account=个人"}); a != "个人" {
 		t.Fatal(a)
+	}
+	a, to, rest := splitAccount([]string{"-c", "--switch-account", "备用", "--account=工作"})
+	if a != "工作" || to != "备用" || !reflect.DeepEqual(rest, []string{"-c"}) {
+		t.Fatal(a, to, rest)
+	}
+	if _, to, _ = splitAccount([]string{"--switch-account=备用"}); to != "备用" {
+		t.Fatal(to)
 	}
 }
 func TestResumeWithoutID(t *testing.T) {

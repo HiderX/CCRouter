@@ -15,10 +15,20 @@ func (x *Indexer) Watch(ctx context.Context, changed func(error)) error {
 	if e != nil {
 		return e
 	}
-	paths := []string{x.Store.Root}
-	for _, a := range as {
-		paths = append(paths, a.Profile)
+	// Shared profiles link projects to the hub; FSEvents reports the real path, so the
+	// real directories are watched too.
+	watched := func() ([]string, []root) {
+		rs := roots(as)
+		paths := []string{x.Store.Root}
+		for _, a := range as {
+			paths = append(paths, a.Profile)
+		}
+		for _, r := range rs {
+			paths = append(paths, r.dir)
+		}
+		return paths, rs
 	}
+	paths, rs := watched()
 	es := &fsevents.EventStream{Paths: paths, Flags: fsevents.FileEvents | fsevents.WatchRoot, Latency: time.Second, Events: make(chan []fsevents.Event, 64)}
 	if e = es.Start(); e != nil {
 		return e
@@ -49,10 +59,7 @@ func (x *Indexer) Watch(ctx context.Context, changed func(error)) error {
 					}
 					if different {
 						as = current
-						paths = []string{x.Store.Root}
-						for _, a := range as {
-							paths = append(paths, a.Profile)
-						}
+						paths, rs = watched()
 						es.Stop()
 						es.Paths = paths
 						es.Resume = false
@@ -79,10 +86,10 @@ func (x *Indexer) Watch(ctx context.Context, changed func(error)) error {
 					continue
 				}
 				seen[path] = true
-				for _, a := range as {
-					if strings.HasPrefix(path, filepath.Join(a.Profile, "projects")+string(filepath.Separator)) {
+				for _, r := range rs {
+					if strings.HasPrefix(path, r.dir+string(filepath.Separator)) {
 						dirty = true
-						if e = x.File(a, path); e != nil {
+						if e = x.File(r.owner, path); e != nil {
 							last = e
 						}
 						break

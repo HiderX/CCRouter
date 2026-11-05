@@ -77,3 +77,27 @@ func TestMalformedLineIsVisibleAndDoesNotAdvance(t *testing.T) {
 		t.Fatal("advanced past damaged data")
 	}
 }
+func TestConversationFollowsRunningAccount(t *testing.T) {
+	s, _ := store.Open(t.TempDir())
+	defer s.Close()
+	a, _ := s.AddAccount("A", "")
+	b, _ := s.AddAccount("B", "")
+	id := store.NewID()
+	s.Bind(store.Session{ID: id, AccountID: a.ID, CWD: "/p"})
+	path := filepath.Join(a.Profile, "projects", "p", id+".jsonl")
+	os.MkdirAll(filepath.Dir(path), 0700)
+	now := time.Now()
+	os.WriteFile(path, []byte(fmt.Sprintf(`{"type":"assistant","sessionId":%q,"cwd":"/p","timestamp":%q,"message":{"id":"m","usage":{"input_tokens":1,"output_tokens":1}}}`+"\n", id, now.Format(time.RFC3339Nano))), 0600)
+	// B resumed it inside Claude: B's registry names this process.
+	os.MkdirAll(filepath.Join(b.Profile, "sessions"), 0700)
+	os.WriteFile(filepath.Join(b.Profile, "sessions", "1.json"), []byte(fmt.Sprintf(`{"pid":%d,"sessionId":%q}`, os.Getpid(), id)), 0600)
+	if e := (&Indexer{Store: s}).Scan(); e != nil {
+		t.Fatal(e)
+	}
+	if v, _ := s.Session(id); v.AccountID != b.ID {
+		t.Fatal("binding did not follow the running account")
+	}
+	if v, _ := s.Totals(b.ID, now.Add(-time.Second), now.Add(time.Second)); v.Requests != 1 {
+		t.Fatal(v)
+	}
+}

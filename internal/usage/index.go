@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,15 +40,44 @@ type record struct {
 	} `json:"message"`
 }
 
+// root is one real projects directory. Shared profiles all link to the hub's, so it is
+// walked once. owner is the account whose profile holds it as a real directory, if any.
+type root struct {
+	dir   string
+	owner store.Account
+}
+
+func roots(as []store.Account) []root {
+	var out []root
+	index := map[string]int{}
+	for _, a := range as {
+		p := filepath.Join(a.Profile, "projects")
+		dir := p
+		if r, e := filepath.EvalSymlinks(p); e == nil {
+			dir = r
+		}
+		i, ok := index[dir]
+		if !ok {
+			i = len(out)
+			index[dir] = i
+			out = append(out, root{dir: dir})
+		}
+		if fi, e := os.Lstat(p); e != nil || fi.Mode()&os.ModeSymlink == 0 {
+			out[i].owner = a
+		}
+	}
+	return out
+}
+
 func (x *Indexer) Scan() error {
 	as, e := x.Store.Accounts()
 	if e != nil {
 		return e
 	}
 	var errs []error
-	for _, a := range as {
-		base := filepath.Join(a.Profile, "projects")
-		e = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+	for _, r := range roots(as) {
+		a := r.owner
+		e = filepath.WalkDir(r.dir, func(path string, d fs.DirEntry, err error) error {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
@@ -62,14 +92,21 @@ func (x *Indexer) Scan() error {
 			return nil
 		})
 		if e != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", a.Name, e))
+			errs = append(errs, fmt.Errorf("%s: %w", r.dir, e))
 		}
 	}
 	return errors.Join(errs...)
 }
-func (x *Indexer) File(a store.Account, path string) error {
+
+// File indexes new records in one transcript. A conversation counts toward the account
+// running it now, else the one it is bound to, else owner, the account whose directory
+// holds the file. With no owner, an unbound conversation is not CCRouter's and is skipped.
+func (x *Indexer) File(owner store.Account, path string) error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
+	if r, e := filepath.EvalSymlinks(path); e == nil {
+		path = r
+	}
 	f, e := os.Open(path)
 	if errors.Is(e, os.ErrNotExist) {
 		return nil
@@ -100,13 +137,45 @@ func (x *Indexer) File(a store.Account, path string) error {
 	if _, e = f.Seek(offset, io.SeekStart); e != nil {
 		return e
 	}
+	as, e := x.Store.Accounts()
+	if e != nil {
+		return e
+	}
+	live := map[string][]string{}
+	for _, a := range as {
+		for _, p := range running(a.Profile) {
+			live[p.SessionID] = append(live[p.SessionID], a.ID)
+		}
+	}
+	// A conversation follows the account that last ran it, so its next resume finds that
+	// account's prompt cache. While its bound account still runs it, the binding stays.
+	owners := map[string]string{}
+	follows := map[string]bool{}
+	ownerOf := func(id string) string {
+		if v, ok := owners[id]; ok {
+			return v
+		}
+		v := owner.ID
+		if bound, e := x.Store.Session(id); e == nil {
+			v = bound.AccountID
+		}
+		if ids := live[id]; len(ids) > 0 && !slices.Contains(ids, v) {
+			v, follows[id] = ids[0], true
+		}
+		owners[id] = v
+		return v
+	}
 	r := bufio.NewReaderSize(f, 64*1024)
 	var rows []store.Usage
 	bindings := map[string]store.Session{}
 	committed := offset
 	flush := func() error {
-		for _, v := range bindings {
-			if e := x.Store.Bind(v); e != nil {
+		for id, v := range bindings {
+			bind := x.Store.Bind
+			if follows[id] {
+				bind = x.Store.Follow
+			}
+			if e := bind(v); e != nil {
 				return e
 			}
 		}
@@ -137,15 +206,22 @@ func (x *Indexer) File(a store.Account, path string) error {
 		if e != nil {
 			continue
 		}
+		account := owner.ID
 		if v.SessionID != "" {
-			bindings[v.SessionID] = store.Session{ID: v.SessionID, AccountID: a.ID, CWD: v.CWD, Updated: ts.Unix()}
+			account = ownerOf(v.SessionID)
+		}
+		if account == "" {
+			continue
+		}
+		if v.SessionID != "" {
+			bindings[v.SessionID] = store.Session{ID: v.SessionID, AccountID: account, CWD: v.CWD, Updated: ts.Unix()}
 		}
 		if v.Type == "assistant" && v.Message.ID != "" && v.Message.Usage != nil {
 			u := v.Message.Usage
 			if u.Input < 0 || u.Output < 0 || u.Read < 0 || u.Write < 0 {
 				continue
 			}
-			rows = append(rows, store.Usage{AccountID: a.ID, MessageID: v.Message.ID, SessionID: v.SessionID, Time: ts.Unix(), Totals: store.Totals{Input: u.Input, Output: u.Output, CacheRead: u.Read, CacheWrite: u.Write}})
+			rows = append(rows, store.Usage{AccountID: account, MessageID: v.Message.ID, SessionID: v.SessionID, Time: ts.Unix(), Totals: store.Totals{Input: u.Input, Output: u.Output, CacheRead: u.Read, CacheWrite: u.Write}})
 		}
 		if len(rows) >= 256 || len(bindings) >= 128 {
 			if e = flush(); e != nil {

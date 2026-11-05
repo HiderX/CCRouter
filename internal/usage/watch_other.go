@@ -29,8 +29,12 @@ func (x *Indexer) Watch(ctx context.Context, changed func(error)) error {
 	if e != nil {
 		return e
 	}
+	rs := roots(as)
 	for _, a := range as {
 		add(a.Profile)
+	}
+	for _, r := range rs {
+		add(r.dir)
 	}
 	changed(x.Scan())
 	for {
@@ -50,9 +54,9 @@ func (x *Indexer) Watch(ctx context.Context, changed func(error)) error {
 			if !strings.HasSuffix(ev.Name, ".jsonl") {
 				continue
 			}
-			for _, a := range as {
-				if strings.HasPrefix(ev.Name, filepath.Join(a.Profile, "projects")+string(filepath.Separator)) {
-					changed(x.File(a, ev.Name))
+			for _, r := range rs {
+				if strings.HasPrefix(ev.Name, r.dir+string(filepath.Separator)) {
+					changed(x.File(r.owner, ev.Name))
 					break
 				}
 			}

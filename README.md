@@ -94,6 +94,7 @@ ccrouter --resume                 # choose a conversation from every account and
 ccrouter --resume "weekly report" # open the list with a search term
 ccrouter -c                       # continue the latest conversation in this folder
 ccrouter --account Work           # skip the choice and use this account
+ccrouter -c --switch-account Spare # carry on under another account (the cache starts cold)
 ccrouter --model opus "fix login" # everything else goes to claude unchanged
 ```
 
@@ -126,16 +127,19 @@ Other commands:
 - **Accounts:** click anywhere on an account to show its email and quota bars, each with the time left until it resets. On an expanded account, 设为默认 (Set as default) makes it the default for new conversations. The ✓ marks the current default.
 - **Exit IP:** the address and country your traffic leaves from. Click to copy.
 - **最近对话 (Recent conversations):** resume one of your latest conversations in Terminal, on its account, or start 新对话… (New conversation) in a folder you choose.
+- **换账户继续 (Continue on another account):** with more than one account, the 续聊沿用原账户 row becomes this. When an account runs out, pick a recent conversation and another logged-in account to carry it on.
 - **Gear menu:** import `~/.claude`, rename an account, log in again, refresh account details, or open the data folder.
 
 ## How it works
 
 - **One config directory per account.** This is the [method Claude Code documents](https://code.claude.com/docs/en/authentication) for staying signed in to several accounts. Claude keys its Keychain entry to the directory, so logins never overwrite each other. An imported `~/.claude` keeps its original Keychain entry.
-- **Binding before launch.** A new conversation gets an ID up front (`--session-id`), recorded with its account. A resume looks the ID up. Bindings never move between accounts, even when two launchers race.
+- **One copy of each conversation.** Every added account links `projects`, `file-history` and `session-env` to the same folders in `~/.claude`, so any account can resume any conversation. Credentials, settings and `.claude.json` stay per account. The first time an account launches, the conversations it recorded on its own are folded into `~/.claude` by rename, with no data copied. A file whose name is taken with different content is left alone, and that folder stays unshared. Folding waits until no Claude of that account is running.
+- **Binding before launch.** A new conversation gets an ID up front (`--session-id`), recorded with its account. A resume looks the ID up. A binding only moves to the account that actually runs the conversation (next item), and two launchers racing can't scramble it.
+- **Switching accounts on purpose.** `--switch-account` (with `--resume` or `-c`) only moves the conversation's binding to the other account. No conversation file is read or written. The ID stays the same, and later resumes use the new account, where the prompt cache now is. The first request after the switch rebuilds the prompt cache in full. Opening another account's conversation with `/resume` inside Claude also moves the binding to the account you are in. Usage from before the switch stays with the old account; usage after it counts toward the new one.
 - **A clean environment.** The launcher removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and similar variables, and refuses settings that would override the account, such as `apiKeyHelper`. Your network and proxy settings stay as they are.
 - **First-run setup.** `claude auth login` saves credentials but leaves Claude's first-run setup pending, so the next interactive start would ask you to log in again. After a login through CCRouter, and before starting an account that is logged in but was never set up, CCRouter sets `hasCompletedOnboarding` and `lastOnboardingVersion` in that account's `.claude.json`. Nothing else in the file changes, and `~/.claude` is left alone.
 - **Quota through Claude Code.** `claude -p /usage` runs in the account's environment with no tools, MCP servers or settings sources, and saves no session. Claude refreshes its login under its own lock, queries usage, and caches the answer as `cachedUsageUtilization` in the account's `.claude.json`. CCRouter reads that cache, and only if it belongs to the account logged in there. The approach follows [CC Switch](https://github.com/farion1231/cc-switch).
-- **Usage indexing.** A single FSEvents stream watches the accounts' `projects` folders. New lines are read from the last byte offset, and records are deduplicated by account and message ID. A half-written line waits for the next event.
+- **Usage indexing.** A single FSEvents stream watches the accounts' `projects` folders. New lines are read from the last byte offset, and each record counts toward the account running the conversation at the time (from each account's `sessions` registry), or else its binding, and a message ID is counted once. A half-written line waits for the next event.
 
 ## Network requests
 
@@ -161,14 +165,14 @@ CCRouter/
   menu.lock   keeps one menu bar app running
 ```
 
-`state.db` holds no tokens, prompts or conversation text. Claude itself writes credentials to the Keychain or the config directory, and CCRouter never reads them: before a launch it only checks that the Keychain entry exists. Each added account also has its own Claude settings, plugins and history.
+`state.db` holds no tokens, prompts or conversation text. Claude itself writes credentials to the Keychain or the config directory, and CCRouter never reads them: before a launch it only checks that the Keychain entry exists. Each added account has its own Claude settings, plugins and prompt history; conversation records are shared.
 
 ## Limitations
 
 - The menu bar app is macOS only. The launcher and indexer also compile for Linux and Windows (SQLite needs cgo and a C toolchain for the target), but haven't been tested there.
 - The interface is in Simplified Chinese.
 - Token counts come from local transcripts. They don't include other machines or requests without recorded usage, so they are not a bill.
-- Plain `claude`, sessions started by an IDE, and `/resume` inside a running conversation don't go through CCRouter's account selection.
+- Plain `claude` and sessions started by an IDE don't go through CCRouter's account selection.
 - In an account added through CCRouter, Claude asks once per project folder whether you trust it. Claude keeps this per config directory.
 - Liquid Glass on macOS 26 hasn't been checked on real hardware yet.
 - Builds are signed ad hoc and not notarized, so a downloaded app needs its quarantine cleared once (see [Download](#download)).

@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,account_id TEXT NOT NULL
 CREATE INDEX IF NOT EXISTS sessions_cwd ON sessions(cwd,updated DESC);
 CREATE TABLE IF NOT EXISTS usage(account_id TEXT NOT NULL REFERENCES accounts(id),message_id TEXT NOT NULL,session_id TEXT NOT NULL,time INTEGER NOT NULL,input INTEGER NOT NULL,output INTEGER NOT NULL,cache_read INTEGER NOT NULL,cache_write INTEGER NOT NULL,PRIMARY KEY(account_id,message_id));
 CREATE INDEX IF NOT EXISTS usage_time ON usage(time,account_id);
+CREATE INDEX IF NOT EXISTS usage_message ON usage(message_id);
 CREATE TABLE IF NOT EXISTS cursors(path TEXT PRIMARY KEY,identity TEXT NOT NULL,offset INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS snapshots(key TEXT PRIMARY KEY,value BLOB NOT NULL,updated INTEGER NOT NULL);
 PRAGMA user_version=1;`)
@@ -218,6 +219,16 @@ func (s *Store) Bind(v Session) error {
 	}
 	return tx.Commit()
 }
+
+// Follow binds a conversation to the account that now runs it: one switched on purpose,
+// or resumed under another account inside Claude. Bind never moves a conversation.
+func (s *Store) Follow(v Session) error {
+	if v.Updated == 0 {
+		v.Updated = time.Now().Unix()
+	}
+	_, e := s.DB.Exec(`INSERT INTO sessions(id,account_id,cwd,updated) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,updated=MAX(sessions.updated,excluded.updated),cwd=CASE WHEN excluded.cwd='' THEN sessions.cwd ELSE excluded.cwd END`, v.ID, v.AccountID, v.CWD, v.Updated)
+	return e
+}
 func (s *Store) Session(id string) (Session, error) {
 	var v Session
 	e := s.DB.QueryRow(`SELECT id,account_id,cwd,updated FROM sessions WHERE id=?`, id).Scan(&v.ID, &v.AccountID, &v.CWD, &v.Updated)
@@ -272,19 +283,21 @@ func (s *Store) Cursor(path string) (identity string, offset int64, err error) {
 }
 
 // CommitUsage commits both records and the byte offset, so crashes cannot lose data.
+// A message already counted under another account belongs to a conversation moved by a
+// switch, so it is not counted again.
 func (s *Store) CommitUsage(path, identity string, offset int64, rows []Usage) error {
 	tx, e := s.DB.Begin()
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback()
-	stmt, e := tx.Prepare(`INSERT INTO usage(account_id,message_id,session_id,time,input,output,cache_read,cache_write) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(account_id,message_id) DO UPDATE SET input=MAX(usage.input,excluded.input),output=MAX(usage.output,excluded.output),cache_read=MAX(usage.cache_read,excluded.cache_read),cache_write=MAX(usage.cache_write,excluded.cache_write)`)
+	stmt, e := tx.Prepare(`INSERT INTO usage(account_id,message_id,session_id,time,input,output,cache_read,cache_write) SELECT ?,?,?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM usage WHERE message_id=? AND account_id<>?) ON CONFLICT(account_id,message_id) DO UPDATE SET input=MAX(usage.input,excluded.input),output=MAX(usage.output,excluded.output),cache_read=MAX(usage.cache_read,excluded.cache_read),cache_write=MAX(usage.cache_write,excluded.cache_write)`)
 	if e != nil {
 		return e
 	}
 	defer stmt.Close()
 	for _, u := range rows {
-		if _, e = stmt.Exec(u.AccountID, u.MessageID, u.SessionID, u.Time, u.Input, u.Output, u.CacheRead, u.CacheWrite); e != nil {
+		if _, e = stmt.Exec(u.AccountID, u.MessageID, u.SessionID, u.Time, u.Input, u.Output, u.CacheRead, u.CacheWrite, u.MessageID, u.AccountID); e != nil {
 			return e
 		}
 	}

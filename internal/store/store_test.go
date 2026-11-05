@@ -79,7 +79,8 @@ func TestUsageDedupAndAccountTotals(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if total.Total() != 190 || total.Requests != 2 {
+	// B met m1 in a conversation moved from A; it is counted under A only.
+	if total.Total() != 180 || total.Requests != 1 {
 		t.Fatalf("double-counted: %+v", total)
 	}
 	one, _ := s.Totals(a.ID, now.Add(-time.Second), now.Add(time.Second))

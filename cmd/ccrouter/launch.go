@@ -25,8 +25,9 @@ var claudeCommands = map[string]bool{
 
 // launch behaves like `claude [args]`: in a terminal it asks which account a new
 // conversation uses, and `--resume` without an ID lists conversations from every account.
+// `--switch-account` resumes the chosen conversation under another account instead.
 func launch(s *store.Store, args []string) error {
-	account, rest := splitAccount(args)
+	account, target, rest := splitAccount(args)
 	if len(rest) > 0 && claudeCommands[rest[0]] {
 		return fmt.Errorf("「%s」是 Claude 自己的管理命令，请直接运行 claude %s", rest[0], strings.Join(rest, " "))
 	}
@@ -52,13 +53,25 @@ func launch(s *store.Store, args []string) error {
 		}
 		account = a.ID
 	}
-	return start(s, account, rest, cwd)
+	return start(s, account, target, rest, cwd)
 }
 
-func start(s *store.Store, account string, args []string, cwd string) error {
-	p, e := session.Prepare(s, account, args, cwd)
+func start(s *store.Store, account, target string, args []string, cwd string) error {
+	var p session.Plan
+	var e error
+	if target != "" {
+		p, e = session.PrepareSwitch(s, target, args, cwd)
+	} else {
+		p, e = session.Prepare(s, account, args, cwd)
+	}
 	if e != nil {
 		return e
+	}
+	if target != "" {
+		fmt.Fprintf(os.Stderr, "CCRouter · 对话已转到「%s」，缓存需要重新建立\n", p.Account.Name)
+	}
+	if p.Unshared != nil {
+		fmt.Fprintf(os.Stderr, "CCRouter · 「%s」的对话目录尚未共享，暂时不能换号：%v\n", p.Account.Name, p.Unshared)
 	}
 	if e = s.Close(); e != nil {
 		return e
@@ -66,22 +79,33 @@ func start(s *store.Store, account string, args []string, cwd string) error {
 	return session.Exec(p)
 }
 
-// splitAccount removes CCRouter's --account flag; Claude has no flag of that name.
-func splitAccount(args []string) (account string, rest []string) {
+// splitAccount removes CCRouter's --account and --switch-account flags; Claude has
+// neither.
+func splitAccount(args []string) (account, target string, rest []string) {
 	for i := 0; i < len(args); i++ {
-		switch a := args[i]; {
-		case a == "--":
-			return account, append(rest, args[i:]...)
-		case strings.HasPrefix(a, "--account="):
-			account = strings.TrimPrefix(a, "--account=")
-		case a == "--account" && i+1 < len(args):
+		a := args[i]
+		if a == "--" {
+			return account, target, append(rest, args[i:]...)
+		}
+		key, val, eq := strings.Cut(a, "=")
+		var dst *string
+		switch key {
+		case "--account":
+			dst = &account
+		case "--switch-account":
+			dst = &target
+		}
+		switch {
+		case dst != nil && eq:
+			*dst = val
+		case dst != nil && i+1 < len(args):
 			i++
-			account = args[i]
+			*dst = args[i]
 		default:
 			rest = append(rest, a)
 		}
 	}
-	return account, rest
+	return account, target, rest
 }
 
 // has reports whether any flag in names is present, in either `--flag` or `--flag=value` form.

@@ -498,13 +498,18 @@ func (a *application) defaultLoggedIn() bool {
 	}
 	return false
 }
-func (a *application) recent(x, y float64) {
-	m := appkit.NewMenuWithTitle("最近对话")
-	a.menuItem(m, "新对话…", a.newSession)
-	m.AddItem(appkit.MenuItem_SeparatorItem())
-	shown := 0
+
+// resumable is a recent conversation worth listing, with the account it belongs to.
+type resumable struct {
+	session       store.Session
+	account       store.Account
+	title, detail string
+}
+
+func (a *application) resumable() []resumable {
+	var out []resumable
 	for _, s := range a.data.Recent {
-		if shown == 12 {
+		if len(out) == 12 {
 			break
 		}
 		var ac store.Account
@@ -518,24 +523,77 @@ func (a *application) recent(x, y float64) {
 		if title == "" {
 			continue
 		}
-		shown++
 		project := filepath.Base(s.CWD)
 		if s.CWD == "" {
 			project = "未知目录"
 		}
-		detail := project + " · " + usage.When(time.Unix(s.Updated, 0)) + " · " + ac.Name
-		i := a.menuItem(m, title, func() { a.terminal(s.CWD, []string{"run", "--resume", s.ID}) })
-		// NSMenuItem.subtitle needs macOS 14.4; older systems get one line.
-		if i.RespondsToSelector(objc.Sel("setSubtitle:")) {
-			objc.Call[objc.Void](i, objc.Sel("setSubtitle:"), detail)
-		} else {
-			i.SetTitle(title + " — " + detail)
-		}
+		out = append(out, resumable{s, ac, title, project + " · " + usage.When(time.Unix(s.Updated, 0)) + " · " + ac.Name})
 	}
-	if shown == 0 {
+	return out
+}
+func (a *application) recent(x, y float64) {
+	m := appkit.NewMenuWithTitle("最近对话")
+	a.menuItem(m, "新对话…", a.newSession)
+	m.AddItem(appkit.MenuItem_SeparatorItem())
+	rs := a.resumable()
+	for _, r := range rs {
+		subtitled(a.menuItem(m, r.title, func() { a.terminal(r.session.CWD, []string{"run", "--resume", r.session.ID}) }), r.title, r.detail)
+	}
+	if len(rs) == 0 {
 		a.menuItem(m, "暂无可恢复的对话", nil)
 	}
 	a.popUp(m, x, y)
+}
+
+// switchAccount carries a conversation on under another account when its own runs out.
+func (a *application) switchAccount(x, y float64) {
+	m := appkit.NewMenuWithTitle("换账户继续")
+	// An account still running Claude has not folded its conversations into the shared
+	// directories yet, so nothing can switch to or from it.
+	waiting := map[string]bool{}
+	for _, ac := range a.data.Accounts {
+		if e := usage.Pending(ac.Profile); e != nil {
+			waiting[ac.ID] = true
+			title := "「" + ac.Name + "」暂时不能换号"
+			subtitled(a.menuItem(m, title, nil), title, e.Error())
+		}
+	}
+	if len(waiting) > 0 {
+		m.AddItem(appkit.MenuItem_SeparatorItem())
+	}
+	rs := a.resumable()
+	for _, r := range rs {
+		targets := appkit.NewMenuWithTitle(r.title)
+		for _, to := range a.data.Accounts {
+			if to.ID == r.account.ID {
+				continue
+			}
+			var fn func()
+			// An account without credentials would open Claude's login inside the conversation.
+			if session.LoggedIn(to.Profile) && !waiting[to.ID] && !waiting[r.account.ID] {
+				fn = func() {
+					a.terminal(r.session.CWD, []string{"run", "--resume", r.session.ID, "--switch-account", to.ID})
+				}
+			}
+			a.menuItem(targets, "改用「"+to.Name+"」继续", fn)
+		}
+		subtitled(a.menuItem(m, r.title, nil), r.title, r.detail).SetSubmenu(targets)
+	}
+	if len(rs) == 0 {
+		a.menuItem(m, "暂无可恢复的对话", nil)
+	}
+	a.popUp(m, x, y)
+}
+
+// subtitled shows detail under title. NSMenuItem.subtitle needs macOS 14.4; older systems
+// get one line.
+func subtitled(i appkit.MenuItem, title, detail string) appkit.MenuItem {
+	if i.RespondsToSelector(objc.Sel("setSubtitle:")) {
+		objc.Call[objc.Void](i, objc.Sel("setSubtitle:"), detail)
+	} else {
+		i.SetTitle(title + " — " + detail)
+	}
+	return i
 }
 
 // menuItem adds an item; one without an action stays disabled unless it gets a submenu.

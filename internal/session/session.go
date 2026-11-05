@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ccrouter/internal/store"
+	"ccrouter/internal/usage"
 )
 
 var uuid = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -26,6 +27,8 @@ type Plan struct {
 	Args, Env      []string
 	CWD, SessionID string
 	Account        store.Account
+	// Unshared says why this account cannot switch conversations yet; nil once it can.
+	Unshared error
 }
 
 func ClaudeBinary() (string, error) {
@@ -73,6 +76,16 @@ func IsDefaultProfile(profile string) bool {
 }
 
 func Prepare(s *store.Store, account string, args []string, cwd string) (Plan, error) {
+	return prepare(s, account, "", args, cwd)
+}
+
+// PrepareSwitch resumes a conversation under account target instead of its own. The
+// conversation is bound to target from then on; no file is copied or moved.
+func PrepareSwitch(s *store.Store, target string, args []string, cwd string) (Plan, error) {
+	return prepare(s, "", target, args, cwd)
+}
+
+func prepare(s *store.Store, account, target string, args []string, cwd string) (Plan, error) {
 	var p Plan
 	var resume, newID string
 	var cont, fork bool
@@ -127,9 +140,33 @@ func Prepare(s *store.Store, account string, args []string, cwd string) (Plan, e
 	if resume != "" && !fork && newID != "" {
 		return p, errors.New("恢复对话不能覆盖原对话 ID")
 	}
-	var a store.Account
+	if target != "" && (resume == "" || fork) {
+		return p, errors.New("--switch-account 只用于 --resume 或 -c，不能与 --fork-session 同用")
+	}
+	var a, from store.Account
+	var source store.Session
 	var e error
-	if resume != "" {
+	if target != "" {
+		source, e = s.Session(resume)
+		if e != nil {
+			return p, fmt.Errorf("对话 %s 尚未索引；请先执行 ccrouter scan: %w", resume, e)
+		}
+		if from, e = s.Account(source.AccountID); e != nil {
+			return p, e
+		}
+		if a, e = s.Account(target); e != nil {
+			return p, e
+		}
+		if a.ID == from.ID {
+			return p, fmt.Errorf("该对话已经属于账户「%s」", a.Name)
+		}
+		p.SessionID = resume
+		p.Args = []string{"--resume", resume}
+		// Claude looks for the conversation under its own project directory.
+		if source.CWD != "" {
+			cwd = source.CWD
+		}
+	} else if resume != "" {
 		v, err := s.Session(resume)
 		if err != nil {
 			return p, fmt.Errorf("对话 %s 尚未索引；请先执行 ccrouter scan: %w", resume, err)
@@ -181,6 +218,14 @@ func Prepare(s *store.Store, account string, args []string, cwd string) (Plan, e
 	}
 	// A failure here only means Claude shows its first-run setup; it does not block the launch.
 	_ = EnsureOnboarded(a.Profile, p.Binary)
+	// Sharing lets this account resume conversations from the others. A profile that
+	// cannot share yet still launches; only switching needs it.
+	p.Unshared = usage.Share(a.Profile)
+	if target != "" {
+		if e = handOff(s, from, a, source); e != nil {
+			return p, e
+		}
+	}
 	p.Account = a
 	p.CWD = cwd
 	p.Env = Environment(a.Profile, os.Environ())

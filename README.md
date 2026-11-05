@@ -100,20 +100,27 @@ ccrouter --model opus "fix login" # everything else goes to claude unchanged
 
 The account list shows each account's email and marks the default and any account that isn't logged in. Use the arrow keys or type the number. The conversation list shows each conversation's title, project, last activity and account. Titles are the ones Claude generates, or the first prompt when there is none.
 
-The lists only appear in an interactive terminal. In scripts, pipes and `-p` (print) mode, a new conversation uses the default account, and `--resume` needs a full conversation ID. Claude's own management commands, such as `mcp`, `doctor` and `update`, don't go through CCRouter. Run them with `claude`.
+With automatic scheduling on (see Automatic scheduling under [How it works](#how-it-works)), a new conversation doesn't ask for an account: the strategy picks one, and the launcher says which and why. `--account` still chooses directly.
+
+The lists only appear in an interactive terminal. In scripts, pipes and `-p` (print) mode, a new conversation uses the default account (or the strategy's pick, with automatic scheduling), and `--resume` needs a full conversation ID. Claude's own management commands, such as `mcp`, `doctor` and `update`, don't go through CCRouter. Run them with `claude`.
 
 Other commands:
 
 | Command | What it does |
 | --- | --- |
 | `ccrouter gui` | Open the menu bar app |
-| `ccrouter run [args]` | Start without asking, on the default account or `--account` |
+| `ccrouter run [args]` | Start without asking, on the default account, the scheduler's pick, or `--account` |
 | `ccrouter account list` | List accounts (`*` marks the default) |
 | `ccrouter account add NAME` | Add an account with its own config directory and log in |
 | `ccrouter account import [--name NAME] [--profile DIR]` | Register an existing config directory, `~/.claude` by default |
 | `ccrouter account use NAME` | Set the default account for new conversations |
 | `ccrouter account login NAME` | Log in again |
 | `ccrouter account rename NAME NEW` | Change the display name only |
+| `ccrouter schedule` | Show the scheduling mode, each account's threshold and the next account |
+| `ccrouter schedule manual` or `auto [最优\|轮询\|5h]` | Switch between manual and automatic scheduling, and pick the strategy |
+| `ccrouter schedule threshold NAME PERCENT` | Set an account's threshold (50–100, in steps of 5) |
+| `ccrouter schedule include\|exclude NAME` | Let an account take part in automatic scheduling, or leave it out |
+| `ccrouter schedule resume on\|off` | Whether a resume switches accounts at the threshold |
 | `ccrouter sessions` | List conversations and their accounts |
 | `ccrouter stats [--account NAME] [--days 1\|7\|0]` | Token totals as JSON (`--days 0` for all time) |
 | `ccrouter quota` | Quota windows for every account |
@@ -124,10 +131,11 @@ Other commands:
 ## Menu bar panel
 
 - **Usage:** total tokens, requests and input cache hit rate, a one-hour trend, and a breakdown of cache reads, cache writes, uncached input and output. Click 今日 (Today) to cycle through today, the last 7 days and all time.
-- **Accounts:** click anywhere on an account to show its email and quota bars, each with the time left until it resets. On an expanded account, 设为默认 (Set as default) makes it the default for new conversations. The ✓ marks the current default.
+- **Accounts:** click anywhere on an account to show its email and quota bars, each with the time left until it resets. On an expanded account, 设为默认 (Set as default) makes it the default for new conversations. The ✓ marks the current default. With automatic scheduling, a blue arrow and 下一个 (Next) mark the account the next conversation gets instead, accounts that reached their threshold, aren't logged in or don't take part are labeled too, and a tick on an expanded account's quota bars marks its threshold.
 - **Exit IP:** the address and country your traffic leaves from. Click to copy.
-- **最近对话 (Recent conversations):** resume one of your latest conversations in Terminal, on its account, or start 新对话… (New conversation) in a folder you choose.
-- **换账户继续 (Continue on another account):** with more than one account, the 续聊沿用原账户 row becomes this. When an account runs out, pick a recent conversation and another logged-in account to carry it on.
+- **账户调度 (Account scheduling):** with more than one account, the 续聊沿用原账户 row becomes this, and opens in place to switch between manual and automatic. Manual works as before: new conversations use the default account, resumes keep theirs. Automatic offers three strategies, each showing the account it would pick right now, then which accounts take part, each account's threshold, and whether a resume switches at the threshold. The last line says why the next conversation goes where it goes.
+- **最近对话 (Recent conversations):** opens in place. Click a conversation to resume it in Terminal on its own account, or where automatic scheduling moves it; its account label then reads "old → new". Click the account label to continue on another logged-in account, or to keep the conversation's own. 新对话… (New conversation) starts one in a folder you choose.
+- While account scheduling or recent conversations is open, the usage section steps aside, and opening one section closes the others, so the panel fits the screen.
 - **Gear menu:** import `~/.claude`, rename an account, log in again, refresh account details, or open the data folder.
 
 ## How it works
@@ -136,6 +144,12 @@ Other commands:
 - **One copy of each conversation.** Every added account links `projects`, `file-history` and `session-env` to the same folders in `~/.claude`, so any account can resume any conversation. Credentials, settings and `.claude.json` stay per account. The first time an account launches, the conversations it recorded on its own are folded into `~/.claude` by rename, with no data copied. A file whose name is taken with different content is left alone, and that folder stays unshared. Folding waits until no Claude of that account is running.
 - **Binding before launch.** A new conversation gets an ID up front (`--session-id`), recorded with its account. A resume looks the ID up. A binding only moves to the account that actually runs the conversation (next item), and two launchers racing can't scramble it.
 - **Switching accounts on purpose.** `--switch-account` (with `--resume` or `-c`) only moves the conversation's binding to the other account. No conversation file is read or written. The ID stays the same, and later resumes use the new account, where the prompt cache now is. The first request after the switch rebuilds the prompt cache in full. Opening another account's conversation with `/resume` inside Claude also moves the binding to the account you are in. Usage from before the switch stays with the old account; usage after it counts toward the new one.
+- **Automatic scheduling.** The decision is made at launch, from the readings Claude cached, so a launch never waits for a refresh; a window past its reset counts as empty. While automatic scheduling is on, the menu bar app refreshes quotas in the background every 10 minutes. Each account has its own threshold (95% by default). Once either window reaches it, the account counts as full and every strategy skips it.
+  - **5h/7d 最优 (5h/7d optimal):** headroom left in a 5-hour window lapses at its reset, so headroom below the threshold divided by the hours until the reset says how pressing it is to use that account now. A window not yet running loses nothing; it counts as two windows long, so running windows with headroom go first. Weekly quota tempers this: weekly headroom per remaining day, against an even pace through the week, scales an account down so it doesn't run out of weekly quota early.
+  - **轮询 (Round robin):** the next usable account after the one assigned last, in account order.
+  - **5h 最大利用 (5-hour max):** only the 5-hour window counts. The running window that resets first goes first; with no window running, the one with the most headroom.
+
+  A resume moves to the strategy's pick only when switching on resume is on and the conversation's account takes part and has reached its threshold. `--account` and `--switch-account` always win. With no usable account, a new conversation uses the default account.
 - **A clean environment.** The launcher removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and similar variables, and refuses settings that would override the account, such as `apiKeyHelper`. Your network and proxy settings stay as they are.
 - **First-run setup.** `claude auth login` saves credentials but leaves Claude's first-run setup pending, so the next interactive start would ask you to log in again. After a login through CCRouter, and before starting an account that is logged in but was never set up, CCRouter sets `hasCompletedOnboarding` and `lastOnboardingVersion` in that account's `.claude.json`. Nothing else in the file changes, and `~/.claude` is left alone.
 - **Quota through Claude Code.** `claude -p /usage` runs in the account's environment with no tools, MCP servers or settings sources, and saves no session. Claude refreshes its login under its own lock, queries usage, and caches the answer as `cachedUsageUtilization` in the account's `.claude.json`. CCRouter reads that cache, and only if it belongs to the account logged in there. The approach follows [CC Switch](https://github.com/farion1231/cc-switch).
@@ -151,6 +165,8 @@ CCRouter's own requests are limited to the exit IP probe, and it sends no teleme
 | --- | --- | --- |
 | `api.ipify.org` | When the panel opens, at most every 15 minutes | Exit IP |
 | `ipinfo.io/<ip>/country` | After a new IP is found | Country of that IP. The IP is shown alone if this fails. |
+
+`claude -p /usage`, for quota, runs when the panel opens, and with automatic scheduling on also every 10 minutes in the background, at most every 5 minutes per account.
 
 Proxy rules may route these probes differently from Claude's own requests, so the exit IP is a hint, not proof.
 
@@ -190,6 +206,7 @@ make icon                                   # rebuild the app icon from designs/
 ```text
 cmd/ccrouter/        launcher and command line
 cmd/ccrouter-tray/   menu bar app
+internal/schedule/   automatic scheduling: strategies, thresholds, resume switching
 internal/session/    launch plan, account environment, login and setup checks
 internal/store/      SQLite store and conversation bindings
 internal/usage/      incremental transcript indexing, file events, conversation titles

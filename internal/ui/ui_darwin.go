@@ -112,9 +112,46 @@ func Run(s *store.Store, demo bool) error {
 		} else {
 			a.restartWatch()
 			a.refreshLocal()
+			go a.keepQuotasFresh()
 		}
 	})
 	return nil
+}
+
+// keepQuotasFresh refreshes quota readings every ten minutes while automatic scheduling
+// is on, so launches decide from recent readings even when the panel stays closed. Each
+// reading still comes from Claude's own /usage, at most once per account in its interval.
+func (a *application) keepQuotasFresh() {
+	t := time.NewTicker(10 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-a.ctx.Done():
+			return
+		case <-t.C:
+			auto := make(chan bool, 1)
+			mainThread(func() { auto <- a.data.Schedule.Auto() })
+			if <-auto {
+				a.refreshQuotas(false)
+			}
+		}
+	}
+}
+
+// refreshQuotas renews each account's quota reading and login check, off the main thread.
+func (a *application) refreshQuotas(force bool) {
+	accounts, _ := a.s.Accounts()
+	for _, ac := range accounts {
+		q := a.reader.Quota(a.ctx, ac, force)
+		in := session.LoggedIn(ac.Profile)
+		mainThread(func() {
+			a.quotas[ac.ID] = q
+			a.loggedIn[ac.ID] = in
+			if a.pop.IsShown() {
+				a.render()
+			}
+		})
+	}
 }
 func (a *application) show() {
 	a.render()
@@ -220,7 +257,6 @@ func (a *application) refreshRemote(force bool) {
 	}
 	a.refreshing = true
 	go func() {
-		accounts, _ := a.s.Accounts()
 		ip, ts, e := a.reader.IP(a.ctx, force)
 		mainThread(func() {
 			if e == nil {
@@ -232,17 +268,7 @@ func (a *application) refreshRemote(force bool) {
 				a.render()
 			}
 		})
-		for _, ac := range accounts {
-			q := a.reader.Quota(a.ctx, ac, force)
-			in := session.LoggedIn(ac.Profile)
-			mainThread(func() {
-				a.quotas[ac.ID] = q
-				a.loggedIn[ac.ID] = in
-				if a.pop.IsShown() {
-					a.render()
-				}
-			})
-		}
+		a.refreshQuotas(force)
 		mainThread(func() {
 			a.refreshing = false
 			if a.pop.IsShown() {

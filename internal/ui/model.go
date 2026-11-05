@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"ccrouter/internal/schedule"
 	"ccrouter/internal/store"
 	"fmt"
 	"strings"
@@ -16,6 +17,8 @@ type snapshot struct {
 	ByAccount map[string]store.Totals
 	Trend     []store.Totals
 	Recent    []store.Session
+	Schedule  schedule.Config
+	Last      string // the account the scheduler assigned last
 }
 
 func load(s *store.Store, period int) (snapshot, error) {
@@ -49,7 +52,8 @@ func load(s *store.Store, period int) (snapshot, error) {
 	if e != nil {
 		return v, e
 	}
-	// Extra rows cover sessions the menu skips because nothing was said in them.
+	v.Schedule, v.Last = schedule.Load(s), schedule.Last(s)
+	// Extra rows cover sessions the list skips because nothing was said in them.
 	v.Recent, e = s.Recent("", 40)
 	return v, e
 }

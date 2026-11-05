@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ccrouter/internal/icon"
+	"ccrouter/internal/schedule"
 	"ccrouter/internal/session"
 	"ccrouter/internal/status"
 	"ccrouter/internal/store"
@@ -35,7 +36,12 @@ type application struct {
 	controller  appkit.ViewController
 	data        snapshot
 	expanded    map[string]bool
+	open        string // the footer section shown expanded: "schedule", "recent" or ""
+	choosing    string // the conversation whose account choices are shown
+	pick        schedule.Choice
 	quotas      map[string]status.Result
+	loggedIn    map[string]bool // from the latest remote refresh
+	demoRecent  []resumable
 	period      int
 	exit        status.Exit
 	ipErr       string
@@ -68,7 +74,7 @@ func Run(s *store.Store, demo bool) error {
 	defer runtime.UnlockOSThread()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	a := &application{s: s, index: &usage.Indexer{Store: s}, reader: status.New(s), expanded: map[string]bool{}, quotas: map[string]status.Result{}, ctx: ctx, cancel: cancel, demo: demo}
+	a := &application{s: s, index: &usage.Indexer{Store: s}, reader: status.New(s), expanded: map[string]bool{}, quotas: map[string]status.Result{}, loggedIn: map[string]bool{}, ctx: ctx, cancel: cancel, demo: demo}
 	macos.RunApp(func(app appkit.Application, delegate *appkit.ApplicationDelegate) {
 		a.app = app
 		app.SetActivationPolicy(appkit.ApplicationActivationPolicyAccessory)
@@ -228,8 +234,10 @@ func (a *application) refreshRemote(force bool) {
 		})
 		for _, ac := range accounts {
 			q := a.reader.Quota(a.ctx, ac, force)
+			in := session.LoggedIn(ac.Profile)
 			mainThread(func() {
 				a.quotas[ac.ID] = q
+				a.loggedIn[ac.ID] = in
 				if a.pop.IsShown() {
 					a.render()
 				}
@@ -287,6 +295,12 @@ func (a *application) seedDemo() {
 		a.data.ByAccount[id] = store.Totals{Input: 40000 * factor, Output: 20000 * factor, CacheRead: 300000 * factor, CacheWrite: 40000 * factor, Requests: 26 * factor}
 		five, week := time.Now().Add([]time.Duration{135, 48, 260}[i]*time.Minute), time.Now().Add([]time.Duration{76, 30, 140}[i]*time.Hour)
 		a.quotas[id] = status.Result{Quota: status.Quota{FiveHour: &status.Window{Utilization: []float64{32, 68, 12}[i], ResetsAt: &five}, SevenDay: &status.Window{Utilization: []float64{54, 41, 22}[i], ResetsAt: &week}}, Updated: time.Now()}
+	}
+	for i, v := range []struct{ title, project, account string }{{"修复登录流程", "CCRouter", "0"}, {"周报自动化脚本", "AutoResearch", "2"}, {"出口 IP 显示问题", "CCRouter", "1"}, {"边缘节点部署检查", "Hetero-Edge-Ops", "0"}} {
+		at := time.Now().Add(-time.Duration(i*i*5+3) * time.Minute)
+		s := store.Session{ID: fmt.Sprintf("demo-%d", i), AccountID: v.account, CWD: "/demo/" + v.project, Updated: at.Unix()}
+		ac := a.data.Accounts[[]int{0, 2, 1, 0}[i]]
+		a.demoRecent = append(a.demoRecent, resumable{s, ac, v.title, v.project + " · " + usage.When(at)})
 	}
 	a.expanded["0"] = true
 	a.data.Total = store.Totals{Input: 240000, Output: 120000, CacheRead: 1800000, CacheWrite: 240000, Requests: 156}
@@ -443,7 +457,8 @@ func (a *application) newSession() {
 		return
 	}
 	a.pop.Close()
-	if !a.defaultLoggedIn() {
+	// The scheduler only picks accounts that are logged in; otherwise the default is used.
+	if !a.pick.OK() && !a.defaultLoggedIn() {
 		return
 	}
 	p := appkit.OpenPanel_OpenPanel()
@@ -503,13 +518,16 @@ func (a *application) defaultLoggedIn() bool {
 type resumable struct {
 	session       store.Session
 	account       store.Account
-	title, detail string
+	title, detail string // detail: project · last activity
 }
 
 func (a *application) resumable() []resumable {
+	if a.demo {
+		return a.demoRecent
+	}
 	var out []resumable
 	for _, s := range a.data.Recent {
-		if len(out) == 12 {
+		if len(out) == 5 {
 			break
 		}
 		var ac store.Account
@@ -527,73 +545,58 @@ func (a *application) resumable() []resumable {
 		if s.CWD == "" {
 			project = "未知目录"
 		}
-		out = append(out, resumable{s, ac, title, project + " · " + usage.When(time.Unix(s.Updated, 0)) + " · " + ac.Name})
+		out = append(out, resumable{s, ac, title, project + " · " + usage.When(time.Unix(s.Updated, 0))})
 	}
 	return out
 }
-func (a *application) recent(x, y float64) {
-	m := appkit.NewMenuWithTitle("最近对话")
-	a.menuItem(m, "新对话…", a.newSession)
-	m.AddItem(appkit.MenuItem_SeparatorItem())
-	rs := a.resumable()
-	for _, r := range rs {
-		subtitled(a.menuItem(m, r.title, func() { a.terminal(r.session.CWD, []string{"run", "--resume", r.session.ID}) }), r.title, r.detail)
-	}
-	if len(rs) == 0 {
-		a.menuItem(m, "暂无可恢复的对话", nil)
-	}
-	a.popUp(m, x, y)
-}
 
-// switchAccount carries a conversation on under another account when its own runs out.
-func (a *application) switchAccount(x, y float64) {
-	m := appkit.NewMenuWithTitle("换账户继续")
-	// An account still running Claude has not folded its conversations into the shared
-	// directories yet, so nothing can switch to or from it.
-	waiting := map[string]bool{}
-	for _, ac := range a.data.Accounts {
-		if e := usage.Pending(ac.Profile); e != nil {
-			waiting[ac.ID] = true
-			title := "「" + ac.Name + "」暂时不能换号"
-			subtitled(a.menuItem(m, title, nil), title, e.Error())
+// scheduling reports whether the scheduler chooses accounts; with one account there is
+// nothing to choose.
+func (a *application) scheduling() bool { return a.data.Schedule.Auto() && len(a.data.Accounts) > 1 }
+
+// scheduleState is what the scheduler knows about ac from the panel's readings. An account not
+// checked yet counts as logged in until the refresh says otherwise.
+func (a *application) scheduleState(ac store.Account) schedule.State {
+	q := a.quotas[ac.ID]
+	in, checked := a.loggedIn[ac.ID]
+	return schedule.State{Account: ac, Quota: q.Quota, Read: !q.Updated.IsZero(), LoggedIn: in || !checked}
+}
+func (a *application) states() []schedule.State {
+	out := make([]schedule.State, len(a.data.Accounts))
+	for i, ac := range a.data.Accounts {
+		out[i] = a.scheduleState(ac)
+	}
+	return out
+}
+func (a *application) saveSchedule(c schedule.Config) {
+	a.data.Schedule = c
+	if !a.demo {
+		if e := schedule.Save(a.s, c); e != nil {
+			a.notice = e.Error()
 		}
 	}
-	if len(waiting) > 0 {
-		m.AddItem(appkit.MenuItem_SeparatorItem())
-	}
-	rs := a.resumable()
-	for _, r := range rs {
-		targets := appkit.NewMenuWithTitle(r.title)
-		for _, to := range a.data.Accounts {
-			if to.ID == r.account.ID {
-				continue
-			}
-			var fn func()
-			// An account without credentials would open Claude's login inside the conversation.
-			if session.LoggedIn(to.Profile) && !waiting[to.ID] && !waiting[r.account.ID] {
-				fn = func() {
-					a.terminal(r.session.CWD, []string{"run", "--resume", r.session.ID, "--switch-account", to.ID})
-				}
-			}
-			a.menuItem(targets, "改用「"+to.Name+"」继续", fn)
-		}
-		subtitled(a.menuItem(m, r.title, nil), r.title, r.detail).SetSubmenu(targets)
-	}
-	if len(rs) == 0 {
-		a.menuItem(m, "暂无可恢复的对话", nil)
-	}
-	a.popUp(m, x, y)
+	a.render()
 }
 
-// subtitled shows detail under title. NSMenuItem.subtitle needs macOS 14.4; older systems
-// get one line.
-func subtitled(i appkit.MenuItem, title, detail string) appkit.MenuItem {
-	if i.RespondsToSelector(objc.Sel("setSubtitle:")) {
-		objc.Call[objc.Void](i, objc.Sel("setSubtitle:"), detail)
+// toggle expands one footer section and collapses the other and the account details,
+// so the panel stays short enough for the screen.
+func (a *application) toggle(section string) {
+	if a.open == section {
+		a.open = ""
 	} else {
-		i.SetTitle(title + " — " + detail)
+		a.open = section
+		for _, ac := range a.data.Accounts {
+			a.expanded[ac.ID] = false
+		}
 	}
-	return i
+	a.choosing = ""
+	a.render()
+}
+
+// resume opens a conversation in Terminal; extra are launcher flags such as
+// --switch-account or --account.
+func (a *application) resume(r resumable, extra ...string) {
+	a.terminal(r.session.CWD, append([]string{"run", "--resume", r.session.ID}, extra...))
 }
 
 // menuItem adds an item; one without an action stays disabled unless it gets a submenu.

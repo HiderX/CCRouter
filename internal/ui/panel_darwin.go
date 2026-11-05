@@ -2,9 +2,13 @@ package ui
 
 import (
 	"fmt"
+	"maps"
 	"math"
+	"slices"
+	"strings"
 	"time"
 
+	"ccrouter/internal/schedule"
 	"ccrouter/internal/status"
 	"ccrouter/internal/store"
 	"ccrouter/internal/usage"
@@ -131,6 +135,52 @@ func (c *canvas) capsule(x, y, w, h float64) {
 	l.SetBorderWidth(.5)
 	l.SetBorderColor(appkit.Color_LabelColor().ColorWithAlphaComponent(.08).CGColor())
 }
+
+// outline is a capsule ringed in color, for a label that stands out.
+func (c *canvas) outline(x, y, w, h float64, color appkit.Color) {
+	l := c.items[c.fill(x, y, w, h, h/2, c.lift(.5, .08))].v.Layer()
+	l.SetBorderWidth(1)
+	l.SetBorderColor(color.CGColor())
+}
+
+// paragraph places text that wraps within w, its top at y, and returns its height.
+func (c *canvas) paragraph(s string, st style, x, y, w float64) float64 {
+	l := appkit.TextField_WrappingLabelWithString(s)
+	l.SetFont(appkit.Font_SystemFontOfSizeWeight(st.size, st.weight))
+	l.SetTextColor(st.color)
+	l.SetPreferredMaxLayoutWidth(w + 4)
+	// The frame takes the fitted width too, so the label wraps exactly as it was measured.
+	size := l.FittingSize()
+	h := math.Ceil(size.Height)
+	c.place(l.View, x-2, y, math.Ceil(size.Width), h)
+	return h
+}
+
+var tagStyle = style{10, appkit.FontWeightSemibold, appkit.Color_WhiteColor(), false}
+
+func tagWidth(s string) float64 { return measure(s, tagStyle) + 12 }
+
+// tag draws an account's standing in automatic scheduling as a small filled label that
+// ends at right, centered on cy.
+func (c *canvas) tag(s string, right, cy float64) {
+	fill, ink := appkit.Color_LabelColor().ColorWithAlphaComponent(.1), appkit.Color_SecondaryLabelColor()
+	switch s {
+	case "下一个":
+		fill, ink = appkit.Color_ColorWithSRGBRedGreenBlueAlpha(.22, .44, .58, 1), appkit.Color_WhiteColor()
+	case "已达阈值":
+		fill, ink = appkit.Color_ColorWithSRGBRedGreenBlueAlpha(.70, .38, .05, 1), appkit.Color_WhiteColor()
+	}
+	w := tagWidth(s)
+	c.fill(right-w, cy-8, w, 16, 8, fill)
+	c.text(s, style{tagStyle.size, tagStyle.weight, ink, false}, right-w+6, cy, appkit.TextAlignmentLeft, 0)
+}
+
+// card is a rounded tonal block under a group of rows; set its height once they are placed.
+func (c *canvas) card(y float64) int { return c.fill(12, y, panelWidth-24, 0, 12, c.lift(.2, .03)) }
+
+// rule separates rows inside a card.
+func (c *canvas) rule(y float64) { c.fill(24, y, panelWidth-48, .5, 0, appkit.Color_SeparatorColor()) }
+
 func (c *canvas) hline(y float64)       { c.fill(inset, y, edge-inset, .5, 0, appkit.Color_SeparatorColor()) }
 func (c *canvas) vline(x, y, h float64) { c.fill(x, y, .5, h, 0, appkit.Color_SeparatorColor()) }
 
@@ -172,7 +222,17 @@ func (a *application) render() {
 	a.dark = dark
 	plain(dark).PerformAsCurrentDrawingAppearance(func() {
 		c := &canvas{dark: dark}
-		height = a.footer(c, a.accounts(c, a.usage(c, a.header(c))))
+		a.pick = schedule.Choice{}
+		if a.scheduling() {
+			cfg := a.data.Schedule
+			a.pick = cfg.Pick(cfg.Plan(), a.states(), a.data.Last, "", time.Now())
+		}
+		y := a.header(c)
+		// An open footer section is tall; usage steps aside while it is open.
+		if a.open == "" {
+			y = a.usage(c, y)
+		}
+		height = a.footer(c, a.accounts(c, y))
 		view = c.finish(height)
 	})
 	a.content, a.height = view, height
@@ -333,7 +393,19 @@ func (a *application) account(c *canvas, ac store.Account, y float64, first, las
 	open := a.expanded[ac.ID]
 	q := a.quotas[ac.ID]
 	h := 60.0
+	auto, cfg := a.scheduling(), a.data.Schedule
+	m := cfg.Member(ac.ID)
+	standing := ""
+	if auto {
+		standing = cfg.Status(a.scheduleState(ac), time.Now())
+		if standing == "" && a.pick.Account.ID == ac.ID {
+			standing = "下一个"
+		}
+	}
 	notice, warn := quotaNotice(q)
+	if notice == "" && standing == "已达阈值" {
+		notice, warn = fmt.Sprintf("已达 %d%% 阈值，自动调度暂不使用", m.Limit()), true
+	}
 	if open {
 		h = 128
 		if notice != "" {
@@ -350,7 +422,11 @@ func (a *application) account(c *canvas, ac store.Account, y float64, first, las
 		c.items[c.fill(8, y, panelWidth-16, h, 14, c.lift(.2, .03))].v.Layer().SetMaskedCorners(corners)
 	}
 	cy := y + 22
-	if ac.Default {
+	// The mark is the account a new conversation gets: the scheduler's next one, or the default.
+	switch {
+	case standing == "下一个":
+		c.glyph("arrow.right", 12, appkit.FontWeightSemibold, c.accent(), 26, cy)
+	case !auto && ac.Default:
 		c.glyph("checkmark", 13, appkit.FontWeightSemibold, primary, 26, cy)
 	}
 	arrow := "chevron.right"
@@ -378,7 +454,12 @@ func (a *application) account(c *canvas, ac store.Account, y float64, first, las
 	}
 	small := style{11, appkit.FontWeightRegular, secondary, false}
 	if !open {
-		c.text(quotaSummary(q), small, column, y+42, appkit.TextAlignmentLeft, edge-column)
+		room := edge - column
+		if standing != "" {
+			c.tag(standing, edge, y+42)
+			room -= tagWidth(standing) + 6
+		}
+		c.text(quotaSummary(q), small, column, y+42, appkit.TextAlignmentLeft, room)
 	} else {
 		email := ac.Email
 		if email == "" {
@@ -388,11 +469,21 @@ func (a *application) account(c *canvas, ac store.Account, y float64, first, las
 		if ac.Default {
 			action = "新对话默认"
 		}
-		room := edge - column - measure(action, small) - 12
+		room := edge - column - 12
+		switch {
+		case auto && standing != "":
+			room -= tagWidth(standing)
+		case !auto:
+			room -= measure(action, small)
+		}
 		c.text(email, style{12, appkit.FontWeightRegular, secondary, false}, column, y+40, appkit.TextAlignmentLeft, room)
 		now := time.Now()
-		c.quota("5 小时", q.Quota.FiveHour, y+63, now)
-		c.quota("本周", q.Quota.SevenDay, y+97, now)
+		limit := 0.0
+		if auto && !m.Off {
+			limit = float64(m.Limit())
+		}
+		c.quota("5 小时", q.Quota.FiveHour, y+63, now, limit)
+		c.quota("本周", q.Quota.SevenDay, y+97, now, limit)
 		if notice != "" {
 			color := appkit.Color_SecondaryLabelColor()
 			if warn {
@@ -405,9 +496,17 @@ func (a *application) account(c *canvas, ac store.Account, y float64, first, las
 	// The whole block toggles; "设为默认" is the only nested action, so it is placed on top.
 	c.hit(8, y, panelWidth-16, h, "展开或折叠账户", func() {
 		a.expanded[ac.ID] = !open
+		if !open {
+			a.open, a.choosing = "", ""
+		}
 		a.render()
 	})
 	switch {
+	case open && auto:
+		// A new conversation goes where the scheduler says, so there is no default to set.
+		if standing != "" {
+			c.tag(standing, edge, y+40)
+		}
 	case open && ac.Default:
 		c.text("新对话默认", small, edge, y+40, appkit.TextAlignmentRight, 0)
 	case open:
@@ -418,8 +517,9 @@ func (a *application) account(c *canvas, ac store.Account, y float64, first, las
 }
 
 // quota draws one window: label, bar and percentage, with the time to its reset below.
-// Once the reset has passed, the reading no longer applies until Claude refreshes it.
-func (c *canvas) quota(title string, w *status.Window, cy float64, now time.Time) {
+// Once the reset has passed, the reading no longer applies until Claude refreshes it. A
+// limit above zero is the account's scheduling threshold, marked on the bar.
+func (c *canvas) quota(title string, w *status.Window, cy float64, now time.Time, limit float64) {
 	secondary := appkit.Color_SecondaryLabelColor()
 	c.text(title, style{11, appkit.FontWeightRegular, secondary, false}, column, cy, appkit.TextAlignmentLeft, 0)
 	c.fill(94, cy-1.5, 130, 3, 1.5, appkit.Color_QuaternaryLabelColor())
@@ -430,8 +530,15 @@ func (c *canvas) quota(title string, w *status.Window, cy float64, now time.Time
 			reset = "已重置，等待刷新"
 		} else {
 			text = fmt.Sprintf("%.0f%%", w.Utilization)
-			c.fill(94, cy-1.5, 130*math.Min(100, math.Max(0, w.Utilization))/100, 3, 1.5, c.accent())
+			fill := c.accent()
+			if limit > 0 && w.Utilization >= limit {
+				fill = appkit.Color_SystemOrangeColor()
+			}
+			c.fill(94, cy-1.5, 130*math.Min(100, math.Max(0, w.Utilization))/100, 3, 1.5, fill)
 		}
+	}
+	if limit > 0 {
+		c.fill(94+130*limit/100-.75, cy-4.5, 1.5, 9, .75, appkit.Color_LabelColor().ColorWithAlphaComponent(.55))
 	}
 	c.text(text, style{11, appkit.FontWeightRegular, secondary, true}, edge, cy, appkit.TextAlignmentRight, 0)
 	if reset != "" {
@@ -467,27 +574,7 @@ func (a *application) emptyAccounts(c *canvas, y float64) float64 {
 func (a *application) footer(c *canvas, y float64) float64 {
 	primary, secondary := appkit.Color_LabelColor(), appkit.Color_SecondaryLabelColor()
 	c.hline(y + 4)
-	y += 4
-	// With one account a resume can only use it; with more, the row offers to switch.
-	if len(a.data.Accounts) > 1 {
-		c.glyph("arrow.left.arrow.right", 13, appkit.FontWeightRegular, primary, 26, y+22)
-		c.text("换账户继续", style{12, appkit.FontWeightRegular, primary, false}, column, y+22, appkit.TextAlignmentLeft, 0)
-		c.glyph("chevron.right", 11, appkit.FontWeightSemibold, primary, edge-5, y+22)
-		below := y + 38
-		c.hit(8, y+5, panelWidth-16, 34, "换账户继续对话", func() { a.switchAccount(inset, below) })
-	} else {
-		c.glyph("lock.fill", 13, appkit.FontWeightRegular, primary, 26, y+22)
-		c.text("续聊沿用原账户", style{12, appkit.FontWeightRegular, secondary, false}, column, y+22, appkit.TextAlignmentLeft, 0)
-	}
-	y += 40
-	c.hline(y)
-
-	c.text("最近对话", style{13, appkit.FontWeightSemibold, primary, false}, inset, y+16, appkit.TextAlignmentLeft, 0)
-	c.glyph("chevron.right", 11, appkit.FontWeightSemibold, primary, edge-5, y+16)
-	below := y + 32
-	c.hit(8, y+1, panelWidth-16, 30, "最近对话与新对话", func() { a.recent(inset, below) })
-	y += 32
-	c.hline(y)
+	y = a.recentSection(c, a.scheduleSection(c, y+4))
 
 	cy := y + 21
 	c.glyph("plus.circle.fill", 19, appkit.FontWeightRegular, primary, 28, cy)
@@ -499,6 +586,339 @@ func (a *application) footer(c *canvas, y float64) float64 {
 	c.hit(238, cy-14, 28, 28, "退出 CCRouter", a.quit)
 	c.text("仅统计本机已记录的会话", style{11, appkit.FontWeightRegular, secondary, false}, panelWidth/2, y+47, appkit.TextAlignmentCenter, edge-inset)
 	return y + 64
+}
+
+// scheduleSection is the row that says how accounts are chosen. With one account there
+// is nothing to choose, so it only says that a resume keeps its account.
+func (a *application) scheduleSection(c *canvas, y float64) float64 {
+	primary, secondary := appkit.Color_LabelColor(), appkit.Color_SecondaryLabelColor()
+	cy := y + 22
+	if len(a.data.Accounts) < 2 {
+		c.glyph("lock.fill", 13, appkit.FontWeightRegular, primary, 26, cy)
+		c.text("续聊沿用原账户", style{12, appkit.FontWeightRegular, secondary, false}, column, cy, appkit.TextAlignmentLeft, 0)
+		y += 40
+		c.hline(y)
+		return y
+	}
+	cfg, open := a.data.Schedule, a.open == "schedule"
+	icon, tint := "lock.fill", primary
+	if cfg.Auto() {
+		icon, tint = "arrow.triangle.2.circlepath", c.accent()
+	}
+	c.glyph(icon, 13, appkit.FontWeightRegular, tint, 26, cy)
+	switch {
+	case open:
+		c.text("账户调度", style{12, appkit.FontWeightSemibold, primary, false}, column, cy, appkit.TextAlignmentLeft, 0)
+	case cfg.Auto():
+		next := 0.0
+		if a.pick.OK() {
+			_, next = c.text("→ "+a.pick.Account.Name, style{11, appkit.FontWeightRegular, c.accent(), false}, edge-16, cy, appkit.TextAlignmentRight, 90)
+		}
+		c.text("自动 · "+schedule.Name(cfg.Plan()), style{12, appkit.FontWeightSemibold, c.accent(), false}, column, cy, appkit.TextAlignmentLeft, edge-16-next-8-column)
+	default:
+		c.text("手动 · 续聊沿用原账户", style{12, appkit.FontWeightRegular, secondary, false}, column, cy, appkit.TextAlignmentLeft, edge-16-column)
+	}
+	arrow := "chevron.right"
+	if open {
+		arrow = "chevron.down"
+	}
+	c.glyph(arrow, 11, appkit.FontWeightSemibold, primary, edge-5, cy)
+	c.hit(8, y+5, panelWidth-16, 34, "账户调度", func() { a.toggle("schedule") })
+	y += 40
+	if open {
+		y = a.scheduleBody(c, y)
+	}
+	c.hline(y)
+	return y
+}
+
+func (a *application) scheduleBody(c *canvas, y float64) float64 {
+	primary, secondary, tertiary := appkit.Color_LabelColor(), appkit.Color_SecondaryLabelColor(), appkit.Color_TertiaryLabelColor()
+	small := style{11, appkit.FontWeightRegular, secondary, false}
+	cfg := a.data.Schedule
+	set := func(change func(*schedule.Config)) func() {
+		return func() {
+			c := cfg
+			// Members is a map; change a copy so the render's config stays as it was drawn.
+			c.Members = maps.Clone(cfg.Members)
+			change(&c)
+			a.saveSchedule(c)
+		}
+	}
+
+	// Mode: a segmented choice.
+	w := (edge - inset - 4) / 2
+	c.fill(inset, y, edge-inset, 26, 7, appkit.Color_LabelColor().ColorWithAlphaComponent(.07))
+	for i, mode := range []string{schedule.Manual, schedule.Auto} {
+		x, title := inset+2+float64(i)*w, []string{"手动", "自动"}[i]
+		on := (mode == schedule.Auto) == cfg.Auto()
+		weight := appkit.FontWeightRegular
+		if on {
+			c.fill(x, y+2, w, 22, 6, c.lift(.9, .2))
+			weight = appkit.FontWeightSemibold
+		}
+		c.text(title, style{12, weight, primary, false}, x+w/2, y+13, appkit.TextAlignmentCenter, w-8)
+		c.hit(x, y, w, 26, "调度模式："+title, set(func(c *schedule.Config) { c.Mode = mode }))
+	}
+	y += 36
+	if !cfg.Auto() {
+		h := c.paragraph("新对话用默认账户（✓），续聊沿用原账户。在最近对话里点账户名，可以把对话换到别的账户继续。", small, inset+2, y, edge-inset-4)
+		return y + h + 12
+	}
+
+	// Strategies, each with the account it would choose now.
+	states, now := a.states(), time.Now()
+	top, card := y, c.card(y)
+	for i, s := range schedule.Strategies {
+		if i > 0 {
+			c.rule(y)
+		}
+		row, on, cy := y, s == cfg.Plan(), y+15
+		mark, tint := "circle", tertiary
+		if on {
+			mark, tint = "largecircle.fill.circle", c.accent()
+		}
+		c.glyph(mark, 13, appkit.FontWeightRegular, tint, 30, cy)
+		to, ink := "没有可用账户", tertiary
+		if pick := cfg.Pick(s, states, a.data.Last, "", now); pick.OK() {
+			to, ink = "→ "+pick.Account.Name, c.accent()
+		}
+		_, pw := c.text(to, style{11, appkit.FontWeightRegular, ink, false}, panelWidth-24, cy, appkit.TextAlignmentRight, 90)
+		c.text(schedule.Name(s), style{12, appkit.FontWeightSemibold, primary, false}, 44, cy, appkit.TextAlignmentLeft, panelWidth-24-pw-8-44)
+		y += 30
+		if on {
+			y += c.paragraph(schedule.Describe(s), small, 44, y-5, panelWidth-24-44) + 4
+		}
+		c.hit(12, row, panelWidth-24, y-row, "调度策略："+schedule.Name(s), set(func(c *schedule.Config) { c.Strategy = s }))
+	}
+	c.items[card].h = y - top
+	y += 12
+
+	// Who takes part, and the threshold of each.
+	c.text("参与调度的账户", small, inset+2, y+6, appkit.TextAlignmentLeft, 0)
+	c.text("达到即换", small, edge-2, y+6, appkit.TextAlignmentRight, 0)
+	y += 16
+	top, card = y, c.card(y)
+	for i, ac := range a.data.Accounts {
+		if i > 0 {
+			c.rule(y)
+		}
+		m, cy := cfg.Member(ac.ID), y+15
+		box, tint, ink := "checkmark.square.fill", c.accent(), primary
+		if m.Off {
+			box, tint, ink = "square", tertiary, tertiary
+		}
+		sx := panelWidth - 24 - 84.0
+		c.glyph(box, 14, appkit.FontWeightRegular, tint, 30, cy)
+		c.text(ac.Name, style{12, appkit.FontWeightRegular, ink, false}, 44, cy, appkit.TextAlignmentLeft, sx-8-44)
+		label := "让「" + ac.Name + "」参与自动调度"
+		if !m.Off {
+			label = "让「" + ac.Name + "」不参与自动调度"
+		}
+		c.hit(12, y, sx-16, 30, label, set(func(c *schedule.Config) { m.Off = !m.Off; c.SetMember(ac.ID, m) }))
+		c.capsule(sx, cy-11, 84, 22)
+		c.vline(sx+24, cy-7, 14)
+		c.vline(sx+60, cy-7, 14)
+		c.text("−", style{13, appkit.FontWeightRegular, primary, false}, sx+12, cy, appkit.TextAlignmentCenter, 16)
+		c.text(fmt.Sprintf("%d%%", m.Limit()), style{11, appkit.FontWeightSemibold, ink, true}, sx+42, cy, appkit.TextAlignmentCenter, 34)
+		c.text("+", style{13, appkit.FontWeightRegular, primary, false}, sx+72, cy, appkit.TextAlignmentCenter, 16)
+		limit := m.Limit()
+		c.hit(sx, cy-11, 24, 22, "降低「"+ac.Name+"」的阈值", set(func(c *schedule.Config) {
+			m.Threshold = max(schedule.MinThreshold, limit-schedule.Step)
+			c.SetMember(ac.ID, m)
+		}))
+		c.hit(sx+60, cy-11, 24, 22, "提高「"+ac.Name+"」的阈值", set(func(c *schedule.Config) {
+			m.Threshold = min(schedule.MaxThreshold, limit+schedule.Step)
+			c.SetMember(ac.ID, m)
+		}))
+		y += 30
+	}
+	c.items[card].h = y - top
+	y += 6
+	y += c.paragraph("5 小时或本周任一用到阈值，就算额度不足。", small, inset+2, y, edge-inset-4) + 10
+
+	// Moving a resumed conversation costs a cold cache, so it has its own switch.
+	top, card = y, c.card(y)
+	text := panelWidth - 24 - 24 - 44
+	c.text("续聊达到阈值时自动换号", style{12, appkit.FontWeightSemibold, primary, false}, 24, y+15, appkit.TextAlignmentLeft, text)
+	h := 27 + c.paragraph("原账户用到它的阈值才换，会重建一次缓存", small, 24, y+25, text) + 9
+	on, sx, sy := !cfg.Sticky, panelWidth-24-34.0, y+h/2
+	track, knob := appkit.Color_LabelColor().ColorWithAlphaComponent(.16), sx+2
+	if on {
+		track, knob = c.accent(), sx+16
+	}
+	c.fill(sx, sy-10, 34, 20, 10, track)
+	c.fill(knob, sy-8, 16, 16, 8, appkit.Color_WhiteColor())
+	c.items[card].h = h
+	c.hit(12, top, panelWidth-24, h, "续聊达到阈值时自动换号", set(func(c *schedule.Config) { c.Sticky = !c.Sticky }))
+	y += h + 10
+
+	// Why the next conversation goes where it goes.
+	why := "没有可用账户（" + a.pick.Reason + "），新对话使用默认账户。"
+	if a.pick.OK() {
+		why = "下一个对话用「" + a.pick.Account.Name + "」：" + a.pick.Reason + "。"
+	}
+	return y + c.paragraph(why, small, inset+2, y, edge-inset-4) + 12
+}
+
+// recentSection lists recent conversations in place. A conversation resumes under its
+// own account, or where automatic scheduling moves it; its account label opens the other
+// accounts to move it by hand.
+func (a *application) recentSection(c *canvas, y float64) float64 {
+	primary := appkit.Color_LabelColor()
+	open := a.open == "recent"
+	c.text("最近对话", style{13, appkit.FontWeightSemibold, primary, false}, inset, y+16, appkit.TextAlignmentLeft, 0)
+	arrow := "chevron.right"
+	if open {
+		arrow = "chevron.down"
+	}
+	c.glyph(arrow, 11, appkit.FontWeightSemibold, primary, edge-5, y+16)
+	c.hit(8, y+1, panelWidth-16, 30, "最近对话与新对话", func() { a.toggle("recent") })
+	y += 32
+	if open {
+		y = a.recentList(c, y)
+	}
+	c.hline(y)
+	return y
+}
+
+func (a *application) recentList(c *canvas, y float64) float64 {
+	primary, secondary := appkit.Color_LabelColor(), appkit.Color_SecondaryLabelColor()
+	small := style{11, appkit.FontWeightRegular, secondary, false}
+	auto, cfg := a.scheduling(), a.data.Schedule
+	states, now := a.states(), time.Now()
+	rs := a.resumable()
+	// Where each conversation resumes, decided as the launcher will.
+	moves := make([]schedule.Choice, len(rs))
+	var full []string
+	for i, r := range rs {
+		if to, ok := cfg.Resume(states, r.account.ID, a.data.Last, now); auto && ok {
+			moves[i] = to
+			if name := "「" + r.account.Name + "」"; !slices.Contains(full, name) {
+				full = append(full, name)
+			}
+		}
+	}
+	top, card := y, c.card(y)
+	if len(full) > 0 {
+		hint := strings.Join(full, "") + "已达阈值，它的对话恢复时会自动换号。点账户名可以手动改。"
+		strip := c.fill(12, y, panelWidth-24, 0, 12, c.accent().ColorWithAlphaComponent(.1))
+		h := c.paragraph(hint, small, 24, y+7, panelWidth-48) + 14
+		c.items[strip].h = h
+		c.items[strip].v.Layer().SetMaskedCorners(quartzcore.KLayerMinXMaxYCorner | quartzcore.KLayerMaxXMaxYCorner)
+		y += h
+	}
+
+	cy := y + 16
+	c.glyph("plus.circle.fill", 15, appkit.FontWeightRegular, primary, 30, cy)
+	c.text("新对话…", style{12, appkit.FontWeightSemibold, primary, false}, 44, cy, appkit.TextAlignmentLeft, 0)
+	if auto && a.pick.OK() {
+		c.text("→ "+a.pick.Account.Name, style{11, appkit.FontWeightRegular, c.accent(), false}, panelWidth-24, cy, appkit.TextAlignmentRight, 110)
+	}
+	c.hit(12, y, panelWidth-24, 32, "新对话", a.newSession)
+	y += 32
+
+	for i, r := range rs {
+		c.rule(y)
+		label, pst, ring := r.account.Name, style{11, appkit.FontWeightRegular, secondary, false}, false
+		if moves[i].OK() {
+			label, pst, ring = r.account.Name+" → "+moves[i].Account.Name, style{11, appkit.FontWeightSemibold, c.accent(), false}, true
+		}
+		pw := math.Min(measure(label, pst)+16, 140)
+		if !ring {
+			pw += 14 // room for the swap glyph
+		}
+		px, py := panelWidth-24-pw, y+12
+		c.text(r.title, style{12, appkit.FontWeightSemibold, primary, false}, 24, y+15, appkit.TextAlignmentLeft, px-8-24)
+		c.text(r.detail, small, 24, y+31, appkit.TextAlignmentLeft, px-8-24)
+		if ring {
+			c.outline(px, py, pw, 20, c.accent())
+			c.text(label, pst, px+8, py+10, appkit.TextAlignmentLeft, pw-16)
+		} else {
+			c.capsule(px, py, pw, 20)
+			c.text(label, pst, px+8, py+10, appkit.TextAlignmentLeft, pw-30)
+			c.glyph("arrow.left.arrow.right", 8, appkit.FontWeightSemibold, secondary, px+pw-13, py+10)
+		}
+		c.hit(12, y, px-14, 44, "恢复「"+r.title+"」", func() { a.resume(r) })
+		id := r.session.ID
+		c.hit(px-4, y+6, pw+8, 32, "为「"+r.title+"」选择账户", func() {
+			if a.choosing == id {
+				a.choosing = ""
+			} else {
+				a.choosing = id
+			}
+			a.render()
+		})
+		y += 44
+		if a.choosing == id {
+			y = a.choices(c, r, moves[i], y)
+		}
+	}
+	if len(rs) == 0 {
+		c.rule(y)
+		c.text("暂无可恢复的对话", small, 24, y+16, appkit.TextAlignmentLeft, 0)
+		y += 32
+	}
+	c.items[card].h = y - top
+	return y + 10
+}
+
+// choices lists where else a conversation can resume. Every account can run it, since
+// conversations are shared; an account not logged in, or not yet sharing its folders,
+// cannot.
+func (a *application) choices(c *canvas, r resumable, move schedule.Choice, y float64) float64 {
+	secondary, tertiary := appkit.Color_SecondaryLabelColor(), appkit.Color_TertiaryLabelColor()
+	top := y
+	shade := c.fill(12, y, panelWidth-24, 0, 0, appkit.Color_LabelColor().ColorWithAlphaComponent(.04))
+	row := func(text, detail string, ok bool, fn func()) {
+		cy := y + 14
+		ink := c.accent()
+		if !ok {
+			ink = tertiary
+		}
+		c.glyph("arrow.left.arrow.right", 9, appkit.FontWeightSemibold, ink, 32, cy)
+		_, dw := c.text(detail, style{10, appkit.FontWeightRegular, secondary, false}, panelWidth-24, cy, appkit.TextAlignmentRight, 90)
+		c.text(text, style{11.5, appkit.FontWeightSemibold, ink, false}, 44, cy, appkit.TextAlignmentLeft, panelWidth-24-dw-8-44)
+		if ok {
+			c.hit(12, y, panelWidth-24, 28, text, fn)
+		}
+		y += 28
+	}
+	pending := func(ac store.Account) string {
+		switch {
+		case !a.scheduleState(ac).LoggedIn:
+			return "未登录"
+		case !a.demo && usage.Pending(ac.Profile) != nil:
+			return "Claude 运行中，暂不能换"
+		}
+		return ""
+	}
+	if move.OK() {
+		row("仍用「"+r.account.Name+"」恢复", "缓存还在", pending(r.account) == "", func() { a.resume(r, "--account", r.account.ID) })
+	}
+	busy := pending(r.account)
+	for _, to := range a.data.Accounts {
+		if to.ID == r.account.ID {
+			continue
+		}
+		why := pending(to)
+		if why == "" && busy != "" && busy != "未登录" {
+			why = busy
+		}
+		detail := why
+		if detail == "" {
+			detail = "5 小时 —"
+			if w := a.quotas[to.ID].Quota.FiveHour; w != nil {
+				detail = fmt.Sprintf("5 小时 %.0f%%", w.Utilization)
+			}
+			if move.Account.ID == to.ID {
+				detail = "自动选择"
+			}
+		}
+		row("改用「"+to.Name+"」继续", detail, why == "", func() { a.resume(r, "--switch-account", to.ID) })
+	}
+	c.items[shade].h = y - top
+	return y
 }
 
 func (a *application) chart(c *canvas, x, y, w, h float64) {

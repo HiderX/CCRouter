@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"ccrouter/internal/schedule"
 	"encoding/json"
 	"fmt"
 	"github.com/progrium/darwinkit/macos/appkit"
@@ -58,6 +59,20 @@ func (a *application) smoke(dir string) {
 			a.expanded["0"] = false
 			a.render()
 			a.exportSnapshot(filepath.Join(dir, "collapsed.png"))
+			// Automatic scheduling, with 工作账户 past a lowered threshold.
+			a.data.Schedule = schedule.Config{Mode: schedule.Auto}
+			a.data.Schedule.SetMember("1", schedule.Member{Threshold: 65})
+			a.open = "schedule"
+			a.render()
+			a.exportSnapshot(filepath.Join(dir, "schedule.png"))
+			a.open, a.choosing = "recent", "demo-2"
+			a.render()
+			a.exportSnapshot(filepath.Join(dir, "recent.png"))
+			a.data.Schedule = schedule.Config{}
+			a.open, a.choosing = "schedule", ""
+			a.render()
+			a.exportSnapshot(filepath.Join(dir, "manual.png"))
+			a.open = ""
 			saved := a.data
 			a.data = snapshot{}
 			a.render()

@@ -2,7 +2,14 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
+	"time"
+
+	"ccrouter/internal/schedule"
+	"ccrouter/internal/session"
+	"ccrouter/internal/status"
+	"ccrouter/internal/store"
 )
 
 func TestSplitAccount(t *testing.T) {
@@ -47,5 +54,60 @@ func TestResumeWithoutID(t *testing.T) {
 func TestHas(t *testing.T) {
 	if !has([]string{"--print=x"}, "-p", "--print") || has([]string{"--", "-p"}, "-p") || has([]string{"--model"}, "-c") {
 		t.Fatal("has")
+	}
+}
+
+func TestDecide(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s, e := store.Open(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	a, _ := s.AddAccount("A", "")
+	b, _ := s.AddAccount("B", "")
+	soon := time.Now().Add(time.Hour)
+	quotas := map[string]status.Quota{
+		a.ID: {FiveHour: &status.Window{Utilization: 97, ResetsAt: &soon}, SevenDay: &status.Window{Utilization: 10}},
+		b.ID: {FiveHour: &status.Window{Utilization: 10, ResetsAt: &soon}, SevenDay: &status.Window{Utilization: 10}},
+	}
+	cachedQuota = func(x store.Account) status.Result { return status.Result{Quota: quotas[x.ID], Updated: time.Now()} }
+	loggedIn = func(string) bool { return true }
+	t.Cleanup(func() { cachedQuota, loggedIn = status.Cached, session.LoggedIn })
+	c := schedule.Config{Mode: schedule.Auto}
+
+	notice, account, target, assigned := decide(s, c, []string{"fix login"}, "/p")
+	if account != b.ID || target != "" || !assigned || !strings.Contains(notice, "自动选择「B」") {
+		t.Fatal("new conversation:", notice, account, target, assigned)
+	}
+	onA := store.NewID()
+	s.Bind(store.Session{ID: onA, AccountID: a.ID, CWD: "/p"})
+	for _, args := range [][]string{{"--resume", onA}, {"-c"}} {
+		notice, account, target, assigned = decide(s, c, args, "/p")
+		if target != b.ID || account != "" || !assigned || !strings.Contains(notice, "「A」已达阈值") {
+			t.Fatal(args, notice, account, target, assigned)
+		}
+	}
+	// Below its threshold, or with switching on resume off, a conversation stays put.
+	onB := store.NewID()
+	s.Bind(store.Session{ID: onB, AccountID: b.ID, CWD: "/q"})
+	if _, _, target, _ = decide(s, c, []string{"--resume", onB}, "/q"); target != "" {
+		t.Fatal("moved a conversation whose account has room")
+	}
+	sticky := c
+	sticky.Sticky = true
+	if _, _, target, _ = decide(s, sticky, []string{"--resume", onA}, "/p"); target != "" {
+		t.Fatal("moved a conversation with switching on resume off")
+	}
+	// A fork, or a resume CCRouter cannot name, gets no decision.
+	for _, args := range [][]string{{"--resume", onA, "--fork-session"}, {"--resume", store.NewID()}} {
+		if n, acc, tgt, _ := decide(s, c, args, "/p"); n != "" || acc != "" || tgt != "" {
+			t.Fatal(args, n, acc, tgt)
+		}
+	}
+	// With every account at its threshold the default account is used.
+	quotas[b.ID] = quotas[a.ID]
+	if notice, account, _, assigned = decide(s, c, nil, "/p"); account != "" || assigned || !strings.Contains(notice, "使用默认账户") {
+		t.Fatal(notice, account, assigned)
 	}
 }

@@ -60,6 +60,8 @@ func run(args []string) error {
 		return start(s, account, target, rest, cwd)
 	case "account":
 		return accounts(s, args[1:])
+	case "schedule":
+		return scheduling(s, args[1:])
 	case "sessions":
 		vs, e := s.Recent("", 100)
 		if e != nil {
@@ -235,6 +237,17 @@ ccrouter -c                       恢复当前目录最近的已绑定对话
 ccrouter --account 名称 [参数]    跳过选择，指定新对话的账户
 ccrouter --resume|-c --switch-account 名称
                                   把该对话转到另一个账户继续（缓存重新建立）
+
+自动调度：
+ccrouter schedule                 查看调度模式、各账户阈值和下一个账户
+ccrouter schedule manual          手动：新对话用默认账户，续聊沿用原账户
+ccrouter schedule auto [最优|轮询|5h]
+                                  自动：按策略为新对话选账户
+ccrouter schedule threshold 名称 百分比
+                                  5 小时或本周任一用到这个比例就算额度不足
+ccrouter schedule include|exclude 名称
+                                  让账户参与或不参与自动调度
+ccrouter schedule resume on|off   续聊达到阈值时是否自动换号
 
 管理：
 ccrouter gui                      打开 macOS 菜单栏面板

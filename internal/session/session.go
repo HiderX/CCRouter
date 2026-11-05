@@ -85,11 +85,15 @@ func PrepareSwitch(s *store.Store, target string, args []string, cwd string) (Pl
 	return prepare(s, "", target, args, cwd)
 }
 
-func prepare(s *store.Store, account, target string, args []string, cwd string) (Plan, error) {
-	var p Plan
-	var resume, newID string
-	var cont, fork bool
-	var rest []string
+// request is what Claude's arguments ask of a launch; rest is everything else.
+type request struct {
+	resume, newID string
+	cont, fork    bool
+	rest          []string
+}
+
+func parse(args []string) (request, error) {
+	var r request
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		key, val, eq := strings.Cut(arg, "=")
@@ -97,33 +101,66 @@ func prepare(s *store.Store, account, target string, args []string, cwd string) 
 		case "--resume", "-r", "--session-id":
 			if !eq {
 				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
-					return p, fmt.Errorf("%s 需要明确的对话 UUID；可用 ccrouter sessions 查看", key)
+					return r, fmt.Errorf("%s 需要明确的对话 UUID；可用 ccrouter sessions 查看", key)
 				}
 				i++
 				val = args[i]
 			}
 			if !uuid.MatchString(val) {
-				return p, errors.New("自动账户绑定需要完整的对话 UUID")
+				return r, errors.New("自动账户绑定需要完整的对话 UUID")
 			}
 			if key == "--session-id" {
-				newID = val
+				r.newID = val
 			} else {
-				resume = val
+				r.resume = val
 			}
 		case "--continue", "-c":
-			cont = true
+			r.cont = true
 		case "--fork-session":
-			fork = true
+			r.fork = true
 		case "--":
-			rest = append(rest, args[i:]...)
+			r.rest = append(r.rest, args[i:]...)
 			i = len(args)
 		default:
-			rest = append(rest, arg)
+			r.rest = append(r.rest, arg)
 		}
 	}
-	if cont && resume != "" {
-		return p, errors.New("--continue 与 --resume 不能同时使用")
+	if r.cont && r.resume != "" {
+		return r, errors.New("--continue 与 --resume 不能同时使用")
 	}
+	return r, nil
+}
+
+// Resuming names the conversation args resume, without preparing a launch: an explicit
+// ID, or for --continue the latest one in cwd. A fork starts a new conversation, so it
+// is not a resume here.
+func Resuming(s *store.Store, args []string, cwd string) (store.Session, bool) {
+	r, e := parse(args)
+	if e != nil || r.fork {
+		return store.Session{}, false
+	}
+	id := r.resume
+	if r.cont {
+		vs, e := s.Recent(cwd, 1)
+		if e != nil || len(vs) == 0 {
+			return store.Session{}, false
+		}
+		id = vs[0].ID
+	}
+	if id == "" {
+		return store.Session{}, false
+	}
+	v, e := s.Session(id)
+	return v, e == nil
+}
+
+func prepare(s *store.Store, account, target string, args []string, cwd string) (Plan, error) {
+	var p Plan
+	r, e := parse(args)
+	if e != nil {
+		return p, e
+	}
+	resume, newID, cont, fork, rest := r.resume, r.newID, r.cont, r.fork, r.rest
 	if cont {
 		vs, e := s.Recent(cwd, 1)
 		if e != nil {
@@ -145,7 +182,6 @@ func prepare(s *store.Store, account, target string, args []string, cwd string) 
 	}
 	var a, from store.Account
 	var source store.Session
-	var e error
 	if target != "" {
 		source, e = s.Session(resume)
 		if e != nil {

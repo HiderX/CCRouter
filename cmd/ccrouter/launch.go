@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"ccrouter/internal/pick"
+	"ccrouter/internal/schedule"
 	"ccrouter/internal/session"
+	"ccrouter/internal/status"
 	"ccrouter/internal/store"
 	"ccrouter/internal/usage"
 )
@@ -24,8 +26,9 @@ var claudeCommands = map[string]bool{
 }
 
 // launch behaves like `claude [args]`: in a terminal it asks which account a new
-// conversation uses, and `--resume` without an ID lists conversations from every account.
-// `--switch-account` resumes the chosen conversation under another account instead.
+// conversation uses, unless automatic scheduling picks it, and `--resume` without an ID
+// lists conversations from every account. `--switch-account` resumes the chosen
+// conversation under another account instead.
 func launch(s *store.Store, args []string) error {
 	account, target, rest := splitAccount(args)
 	if len(rest) > 0 && claudeCommands[rest[0]] {
@@ -46,7 +49,7 @@ func launch(s *store.Store, args []string) error {
 		}
 		rest = append(append(append([]string{}, rest[:from]...), "--resume", v.ID), rest[to:]...)
 		cwd = v.CWD
-	} else if interactive && account == "" && !has(rest, "-c", "--continue", "-r", "--resume", "--from-pr") {
+	} else if interactive && account == "" && !has(rest, "-c", "--continue", "-r", "--resume", "--from-pr") && !schedule.Load(s).Auto() {
 		a, e := chooseAccount(s)
 		if e != nil {
 			return e
@@ -57,6 +60,13 @@ func launch(s *store.Store, args []string) error {
 }
 
 func start(s *store.Store, account, target string, args []string, cwd string) error {
+	// --account and --switch-account are the user's own choice; without them, automatic
+	// scheduling may choose.
+	var notice string
+	assigned := false
+	if c := schedule.Load(s); account == "" && target == "" && c.Auto() {
+		notice, account, target, assigned = decide(s, c, args, cwd)
+	}
 	var p session.Plan
 	var e error
 	if target != "" {
@@ -66,6 +76,13 @@ func start(s *store.Store, account, target string, args []string, cwd string) er
 	}
 	if e != nil {
 		return e
+	}
+	if notice != "" {
+		fmt.Fprintln(os.Stderr, notice)
+	}
+	if assigned {
+		// Round robin goes on from here. Failing to record it only repeats an account.
+		_ = schedule.SetLast(s, p.Account.ID)
 	}
 	if target != "" {
 		fmt.Fprintf(os.Stderr, "CCRouter · 对话已转到「%s」，缓存需要重新建立\n", p.Account.Name)
@@ -77,6 +94,46 @@ func start(s *store.Store, account, target string, args []string, cwd string) er
 		return e
 	}
 	return session.Exec(p)
+}
+
+// decide applies automatic scheduling to a launch that names no account. A new
+// conversation gets the strategy's account; a resumed one moves only when its own account
+// has reached its threshold. It returns the line to print, the account or switch target,
+// and whether the scheduler assigned it.
+func decide(s *store.Store, c schedule.Config, args []string, cwd string) (notice, account, target string, assigned bool) {
+	states, now, last := states(s), time.Now(), schedule.Last(s)
+	if v, ok := session.Resuming(s, args, cwd); ok {
+		to, ok := c.Resume(states, v.AccountID, last, now)
+		if !ok {
+			return "", "", "", false
+		}
+		return "CCRouter · 自动调度：" + to.Reason, "", to.Account.ID, true
+	}
+	// A fork, or a resume CCRouter cannot name, is left to Prepare as it is.
+	if has(args, "-c", "--continue", "-r", "--resume", "--from-pr", "--fork-session") {
+		return "", "", "", false
+	}
+	to := c.Pick(c.Plan(), states, last, "", now)
+	if !to.OK() {
+		return "CCRouter · 自动调度没有可用账户（" + to.Reason + "），使用默认账户", "", "", false
+	}
+	return "CCRouter · 自动选择「" + to.Account.Name + "」：" + to.Reason, to.Account.ID, "", true
+}
+
+// A launch decides from the readings Claude cached, so it never waits for a refresh.
+var (
+	cachedQuota = status.Cached
+	loggedIn    = session.LoggedIn
+)
+
+func states(s *store.Store) []schedule.State {
+	as, _ := s.Accounts()
+	out := make([]schedule.State, len(as))
+	for i, a := range as {
+		q := cachedQuota(a)
+		out[i] = schedule.State{Account: a, Quota: q.Quota, Read: !q.Updated.IsZero(), LoggedIn: loggedIn(a.Profile)}
+	}
+	return out
 }
 
 // splitAccount removes CCRouter's --account and --switch-account flags; Claude has

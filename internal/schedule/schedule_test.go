@@ -54,7 +54,7 @@ func TestOptimalKeepsWeeklyHeadroom(t *testing.T) {
 
 func TestOptimalSpendsAWindowAboutToReset(t *testing.T) {
 	c, states := example()
-	states[1] = account("工作", 40, 70*time.Minute, 50, 4*day)
+	states[1] = account("工作", 40, 70*time.Minute, 40, 4*day)
 	to := c.Pick(Optimal, states, "", "", now)
 	if to.Account.ID != "工作" || !strings.Contains(to.Reason, "5 小时窗口 1 小时 10 分后重置，还剩 50%，先用掉") {
 		t.Fatal(to)
@@ -203,5 +203,37 @@ func TestLoadSave(t *testing.T) {
 	}
 	if e = SetLast(s, "a"); e != nil || Last(s) != "a" {
 		t.Fatal(e, Last(s))
+	}
+}
+
+// A real reading: Pro1's 5-hour window was about to reset with most of it left, and
+// Pro2's week was about to reset with most of it left. Nine minutes cannot spend 78%,
+// while the week's quota is gone for good at its reset.
+func TestOptimalSpendsTheWeekAboutToReset(t *testing.T) {
+	c := Config{Mode: Auto}
+	states := []State{
+		account("Pro1", 17, 9*time.Minute, 48, 5*day+12*time.Hour+19*time.Minute),
+		account("Pro2", 1, 299*time.Minute, 18, 14*time.Hour+19*time.Minute),
+	}
+	to := c.Pick(Optimal, states, "", "", now)
+	if to.Account.ID != "Pro2" || !strings.Contains(to.Reason, "本周额度 14 小时 19 分后重置，还剩 77%，先用掉") {
+		t.Fatal(to)
+	}
+}
+
+func TestOptimalLetsAWindowTooCloseToItsResetGo(t *testing.T) {
+	c := Config{Mode: Auto}
+	states := []State{account("a", 20, 9*time.Minute, 30, 3*day), account("b", 20, 2*time.Hour, 30, 3*day)}
+	to := c.Pick(Optimal, states, "", "", now)
+	if to.Account.ID != "b" || !strings.Contains(to.Reason, "5 小时窗口 2 小时后重置，还剩 75%，先用掉") {
+		t.Fatal(to)
+	}
+}
+
+func TestOptimalAvoidsAWindowNearlySpent(t *testing.T) {
+	c := Config{Mode: Auto}
+	states := []State{account("a", 85, 3*time.Hour, 30, 3*day), account("b", 0, 0, 30, 3*day)}
+	if to := c.Pick(Optimal, states, "", "", now); to.Account.ID != "b" {
+		t.Fatal(to)
 	}
 }

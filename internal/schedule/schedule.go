@@ -51,7 +51,7 @@ func Describe(strategy string) string {
 	case FiveHour:
 		return "只看 5 小时窗口：先用最早重置、还有余量的账户，用满再换"
 	}
-	return "优先用掉快要重置的 5 小时额度，同时给每周额度留余量"
+	return "先用快过期的额度：周额度优先，5 小时窗口其次"
 }
 
 // Member is one account's part in automatic scheduling.
@@ -259,23 +259,15 @@ func (c Config) Resume(states []State, from, last string, now time.Time) (Choice
 	return to, true
 }
 
-// optimal spends 5-hour quota that would otherwise lapse, while keeping weekly quota
-// on pace. Headroom below a window's threshold is what the account can still use. In a
-// running 5-hour window, headroom left at the reset is lost, so headroom per hour until
-// the reset says how pressing it is to use that account now. A window not yet running
-// loses nothing until it starts; it counts as two windows long, so a running window with
-// real headroom is spent first and idle windows are kept for later. The weekly window
-// tempers this: weekly headroom per day until its reset, against an even pace through
-// the week, scales the score down for an account that would otherwise run out of weekly
-// quota early.
+// tooLate is how close to its reset a running 5-hour window counts as reset already:
+// there is no time left to spend much of what remains in it.
+const tooLate = 30 * time.Minute
+
+// optimal spends first the quota that lapses first. Weekly quota is what an account has
+// to spend; a 5-hour window only limits how fast it goes. So pace leads the score, and
+// the 5-hour window can do no more than about double it.
 func optimal(usable, other []candidate) Choice {
-	score := func(v candidate) float64 {
-		hours := 10.0
-		if v.five.reset > 0 {
-			hours = math.Min(5, math.Max(.5, v.five.reset.Hours()))
-		}
-		return (v.limit - v.five.used) / hours * pace(v)
-	}
+	score := func(v candidate) float64 { return pace(v) * fiveWeight(v) }
 	best := usable[0]
 	for _, v := range usable[1:] {
 		s, b := score(v), score(best)
@@ -285,7 +277,9 @@ func optimal(usable, other []candidate) Choice {
 	}
 	why := "两个窗口都充足"
 	switch {
-	case best.five.reset > 0 && best.five.reset < 5*time.Hour && slices.ContainsFunc(usable, func(v candidate) bool { return v.five.reset == 0 || v.five.reset > best.five.reset }):
+	case pace(best) >= 2:
+		why = fmt.Sprintf("本周额度 %s后重置，还剩 %.0f%%，先用掉", span(best.week.reset), best.limit-best.week.used)
+	case best.five.reset >= tooLate && best.five.reset < 5*time.Hour && slices.ContainsFunc(usable, func(v candidate) bool { return v.five.reset < tooLate || v.five.reset > best.five.reset }):
 		why = fmt.Sprintf("5 小时窗口 %s后重置，还剩 %.0f%%，先用掉", span(best.five.reset), best.limit-best.five.used)
 	case pace(best) < 1:
 		why = fmt.Sprintf("本周还剩 %.0f%%，相对最充足", best.limit-best.week.used)
@@ -299,14 +293,27 @@ func optimal(usable, other []candidate) Choice {
 	return Choice{best.Account, join(why, notes, other)}
 }
 
-// pace compares weekly headroom per remaining day with an even pace through the week,
-// capped at 1. Below 1 the account is ahead of that pace.
+// pace compares weekly headroom per remaining day with an even pace through the week.
+// Above 1, quota will lapse at the reset unless the account gets more than its even
+// share; below 1, the account is ahead of that pace and should wait.
 func pace(v candidate) float64 {
 	days := 7.0
 	if v.week.reset > 0 {
 		days = math.Min(7, math.Max(1.0/24, v.week.reset.Hours()/24))
 	}
-	return math.Min(1, (v.limit-v.week.used)/days/(v.limit/7))
+	return (v.limit - v.week.used) / days / (v.limit / 7)
+}
+
+// fiveWeight is what the 5-hour window does to the score. A window not running loses
+// nothing until it starts and weighs 1. A running one weighs up to nearly 2 the closer it
+// is to its reset, where its headroom lapses. With less than half its headroom left it
+// weighs less in proportion, as a conversation would soon reach the limit.
+func fiveWeight(v candidate) float64 {
+	if v.five.reset < tooLate {
+		return 1
+	}
+	room := math.Min(1, (v.limit-v.five.used)/(v.limit/2))
+	return room * (2 - math.Min(5, v.five.reset.Hours())/5)
 }
 
 // fiveHour uses the running 5-hour window that resets first, so its headroom is not

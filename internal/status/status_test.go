@@ -82,36 +82,37 @@ func TestQuotaIgnoresOtherAccountsCacheAndLoggedOut(t *testing.T) {
 		t.Fatal("logged-out account", q, runs())
 	}
 }
-func TestIPRejectsInvalidAndCaches(t *testing.T) {
+func TestIPProbesClaudesRouteAnonymously(t *testing.T) {
 	s, _ := store.Open(t.TempDir())
 	defer s.Close()
 	r := New(s)
-	body, country := `{"ip":"bad"}`, "JP\n"
+	if !r.Client.Transport.(*http.Transport).DisableKeepAlives {
+		t.Fatal("a reused connection would hide a change of proxy node")
+	}
+	body := "fl=1\nip=bad\nloc=JP\n"
 	calls := 0
 	r.Client.Transport = transport(func(req *http.Request) (*http.Response, error) {
 		calls++
-		if req.URL.Host == "ipinfo.io" {
-			if req.URL.Path != "/203.0.113.24/country" {
-				t.Fatal("unexpected country lookup", req.URL)
-			}
-			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(country))}, nil
+		if req.URL.String() != traceURL || len(req.Header) != 0 || r.Client.Jar != nil {
+			t.Fatal("the probe carried more than its address", req.URL, req.Header)
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})
 	if _, _, e := r.IP(context.Background(), false); e == nil {
 		t.Fatal("accepted invalid IP")
 	}
-	body = `{"ip":"203.0.113.24"}`
+	body = "fl=1\nip=203.0.113.24\nloc=JP\nuag=x\n"
 	x, _, e := r.IP(context.Background(), false)
 	if e != nil || x.IP != "203.0.113.24" || x.Country != "JP" {
 		t.Fatal(x, e)
 	}
-	if x, _, _ = r.IP(context.Background(), false); x.Country != "JP" || calls != 3 {
+	if x, _, _ = r.IP(context.Background(), false); x.IP != "203.0.113.24" || calls != 2 {
 		t.Fatal("cache missed", x, calls)
 	}
-	country = "<html>"
-	if x, _, e = r.IP(context.Background(), true); e != nil || x.IP != "203.0.113.24" || x.Country != "" {
-		t.Fatal("country failure should only hide the country", x, e)
+	// A refresh always probes: the exit may have changed a moment ago.
+	body = "ip=198.51.100.7\nloc=T1\n"
+	if x, _, e = r.IP(context.Background(), true); e != nil || x.IP != "198.51.100.7" || x.Country != "" {
+		t.Fatal("a refresh kept the old exit or an odd country", x, e)
 	}
 }
 func TestIPReadsLegacySnapshot(t *testing.T) {

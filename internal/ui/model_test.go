@@ -13,7 +13,7 @@ func TestCompact(t *testing.T) {
 	}
 }
 func TestRegionAndPlan(t *testing.T) {
-	for code, want := range map[string]string{"JP": "日本", "US": "美国", "HK": "香港", "": "", "ZZ": "", "BT": "BT"} {
+	for code, want := range map[string]string{"JP": "日本", "US": "美国", "HK": "香港", "": "", "ZZ": "", "XX": "", "BT": "BT"} {
 		if got := region(code); got != want {
 			t.Errorf("region(%q) = %q, want %q", code, got, want)
 		}

@@ -51,6 +51,8 @@ type application struct {
 	dark        bool          // appearance used by the last render
 	clock       chan struct{} // closed to stop the per-minute redraw
 	refreshing  bool
+	probing     bool        // an exit IP probe is in flight
+	reprobe     bool        // a refresh arrived during it
 	content     appkit.View // current document view; menus anchor in its coordinates
 	height      float64
 	demo        bool
@@ -252,27 +254,50 @@ func (a *application) refreshLocal() {
 	}()
 }
 func (a *application) refreshRemote(force bool) {
-	if a.demo || a.refreshing {
+	if a.demo {
+		return
+	}
+	a.refreshIP(force)
+	if a.refreshing {
 		return
 	}
 	a.refreshing = true
 	go func() {
-		ip, ts, e := a.reader.IP(a.ctx, force)
-		mainThread(func() {
-			if e == nil {
-				a.exit, a.ipTime, a.ipErr = ip, ts, ""
-			} else {
-				a.ipErr = e.Error()
-			}
-			if a.pop.IsShown() {
-				a.render()
-			}
-		})
 		a.refreshQuotas(force)
 		mainThread(func() {
 			a.refreshing = false
 			if a.pop.IsShown() {
 				a.render()
+			}
+		})
+	}()
+}
+
+// refreshIP probes the exit apart from the quotas, which can take far longer, so a refresh
+// always reaches it. A refresh during a probe runs right after: the probe in flight may
+// have left before the exit changed. A failed probe clears the address rather than show
+// one that may be out of date.
+func (a *application) refreshIP(force bool) {
+	if a.probing {
+		a.reprobe = a.reprobe || force
+		return
+	}
+	a.probing = true
+	go func() {
+		ip, ts, e := a.reader.IP(a.ctx, force)
+		mainThread(func() {
+			a.probing = false
+			if e == nil {
+				a.exit, a.ipTime, a.ipErr = ip, ts, ""
+			} else {
+				a.exit, a.ipErr = status.Exit{}, e.Error()
+			}
+			if a.pop.IsShown() {
+				a.render()
+			}
+			if a.reprobe {
+				a.reprobe = false
+				a.refreshIP(true)
 			}
 		})
 	}()
@@ -370,7 +395,7 @@ func (a *application) exitText() []string {
 }
 func (a *application) copyIP() {
 	if a.exit.IP == "" {
-		a.refreshRemote(true)
+		a.refreshIP(true)
 		return
 	}
 	pb := appkit.Pasteboard_GeneralPasteboard()

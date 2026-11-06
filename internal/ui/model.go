@@ -91,7 +91,7 @@ func region(code string) string {
 	if n, ok := regions[code]; ok {
 		return n
 	}
-	if code == "ZZ" {
+	if code == "ZZ" || code == "XX" {
 		return ""
 	}
 	return code

@@ -6,7 +6,7 @@
 
 同时使用多个 Claude Code 账户，又不会把它们混在一起。CCRouter 把每个对话固定在创建它的账户上，并在原生 macOS 菜单栏面板里显示所有账户的用量和额度。在终端里，`ccrouter` 的用法和 `claude` 一样，只是会先让你选择账户。
 
-没有反向代理，CCRouter 自己也从不与 Anthropic 通信。它只负责选好账户的配置目录，然后把终端交给官方的 `claude`。登录、账户资料和额度同样都来自官方 CLI。
+没有反向代理。CCRouter 只负责选好账户的配置目录，然后把终端交给官方的 `claude`。登录、账户资料和额度都来自官方 CLI。CCRouter 自己只发一种请求：不带任何账户信息的出口 IP 探测。
 
 <p align="center">
   <img src="designs/native-b2-preview.png" width="280" alt="CCRouter 菜单栏面板，浅色外观">
@@ -18,7 +18,7 @@
 ## 为什么用 CCRouter
 
 - **不经手任何请求**。CCRouter 不转发模型流量，也看不到你的提示词。它只准备好运行环境，然后通过 `exec` 把自己替换成 `claude`。请求、流式输出和报错都和官方 CLI 完全一致。
-- **发往 Anthropic 的每个请求都来自 Claude Code**。CCRouter 没有连接 Anthropic 的 HTTP 代码，也从不读取 OAuth token。额度由 Claude Code 自己查询（`claude -p /usage`，一条不调用模型的本地命令），所以 Anthropic 看到的始终是官方客户端。
+- **账户相关的请求都来自 Claude Code**。CCRouter 没有调用 Anthropic API 的代码，也从不读取 OAuth token。额度由 Claude Code 自己查询（`claude -p /usage`，一条不调用模型的本地命令）。CCRouter 唯一发往 Anthropic 域名的请求是匿名的出口 IP 探测，详见[网络请求](#网络请求)。
 - **对话始终留在原账户**。每个对话 ID 只绑定一个账户。恢复时总是用这个账户，即使你之后改了默认账户也一样，因此不会丢失提示词缓存，也不会把一段历史拆散到不同账户里。用其他账户恢复会被拒绝。
 - **几乎不占资源**。每个对话不额外留下进程，不轮询，不用 Electron 或 WebView。见下方[实测数据](#资源占用)。
 - **用量和额度一目了然**。今日、近 7 天或全部的 token 用量，分账户和合计，附带缓存命中率和最近一小时趋势。每个账户的 5 小时和每周额度窗口，以及当前探测到的出口 IP。
@@ -157,18 +157,19 @@ ccrouter --model opus "修复登录"  # 其他参数原样交给 claude
 
 ## 网络请求
 
-CCRouter 从不连接 Anthropic。所有与 Anthropic 相关的操作都由官方 `claude` CLI 在该账户自己的环境中完成：`claude auth login`、`claude auth status`，以及查询额度的 `claude -p /usage`。
+所有与账户相关的操作都由官方 `claude` CLI 在该账户自己的环境中完成：`claude auth login`、`claude auth status`，以及查询额度的 `claude -p /usage`。
 
 CCRouter 自己发出的请求只有出口 IP 探测，不发送任何遥测数据：
 
 | 目标 | 时机 | 用途 |
 | --- | --- | --- |
-| `api.ipify.org` | 打开面板时；最多每 15 分钟一次 | 出口 IP |
-| `ipinfo.io/<ip>/country` | 发现新的 IP 后 | 该 IP 所在国家/地区；失败时只显示 IP |
+| `api.anthropic.com/cdn-cgi/trace` | 打开面板时，最多每分钟一次；点刷新时立即查询 | 出口 IP 和所在国家/地区 |
+
+这是 Cloudflare 的诊断页面。请求发往 Anthropic 的域名，但由 Cloudflare 直接返回，不带 Cookie、token 或任何账户信息。选它是因为 Claude Code 连的也是这个域名，代理的分流规则会让两者走同一条线路。
 
 查询额度的 `claude -p /usage` 在打开面板时运行；开启自动调度后，菜单栏还会每 10 分钟在后台运行一次。每个账户最多每 5 分钟一次。
 
-代理的分流规则可能让这些探测与 Claude 自己的请求走不同的出口，所以出口 IP 只是参考，不能作为证明。
+按进程分流或负载均衡的代理仍可能让探测和 Claude 走不同的出口，所以出口 IP 只是参考，不能作为证明。
 
 ## 数据与隐私
 

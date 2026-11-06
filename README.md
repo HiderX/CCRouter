@@ -6,7 +6,7 @@
 
 Use several Claude Code accounts without mixing them up. CCRouter pins every conversation to the account that started it, and shows usage and quota for all accounts in a native macOS menu bar panel. In the terminal, `ccrouter` works like `claude` and lets you pick the account first.
 
-There is no proxy, and CCRouter never talks to Anthropic itself. It chooses the account's config directory and hands the terminal over to the official `claude` binary. Logins, account details and quota also come from the official CLI.
+There is no proxy. CCRouter chooses the account's config directory and hands the terminal over to the official `claude` binary. Logins, account details and quota also come from the official CLI. CCRouter's only request of its own is an exit IP probe that carries no account information.
 
 <p align="center">
   <img src="designs/native-b2-preview.png" width="280" alt="CCRouter menu bar panel, light appearance">
@@ -18,7 +18,7 @@ There is no proxy, and CCRouter never talks to Anthropic itself. It chooses the 
 ## Why CCRouter
 
 - **Nothing in the request path.** CCRouter never relays model traffic or sees your prompts. It sets up the environment, then replaces itself with `claude` (`exec`). Your requests, streaming and errors are exactly what the official CLI produces.
-- **Every Anthropic request comes from Claude Code.** CCRouter has no HTTP client for Anthropic and never reads OAuth tokens. Quota is asked of Claude Code itself (`claude -p /usage`, a local command with no model turn), so Anthropic only ever sees the official client.
+- **Every account request comes from Claude Code.** CCRouter has no client for the Anthropic API and never reads OAuth tokens. Quota is asked of Claude Code itself (`claude -p /usage`, a local command with no model turn). The only request CCRouter sends to an Anthropic domain is the anonymous exit IP probe described under [Network requests](#network-requests).
 - **Conversations stay on their account.** Each conversation ID is bound to one account. Resuming always uses that account, even after you change the default, so you don't lose the prompt cache or end up with a history split across accounts. A resume on a different account is refused.
 - **Light on your machine.** No per-conversation helper process, no polling, no Electron or WebView. See the [measurements](#resource-usage).
 - **Usage and quota at a glance.** Tokens for today, the last 7 days or all time, per account and in total, with cache hit rate and a one-hour trend. The 5-hour and weekly quota windows for every account, and the exit IP you're probing from.
@@ -157,18 +157,19 @@ Other commands:
 
 ## Network requests
 
-CCRouter never contacts Anthropic. Everything Anthropic-facing is done by the official `claude` CLI, in the account's own environment: `claude auth login`, `claude auth status`, and `claude -p /usage` for quota.
+Everything to do with an account is done by the official `claude` CLI, in the account's own environment: `claude auth login`, `claude auth status`, and `claude -p /usage` for quota.
 
 CCRouter's own requests are limited to the exit IP probe, and it sends no telemetry:
 
 | Destination | When | Why |
 | --- | --- | --- |
-| `api.ipify.org` | When the panel opens, at most every 15 minutes | Exit IP |
-| `ipinfo.io/<ip>/country` | After a new IP is found | Country of that IP. The IP is shown alone if this fails. |
+| `api.anthropic.com/cdn-cgi/trace` | When the panel opens, at most once a minute, and at once on refresh | Exit IP and its country |
+
+This is Cloudflare's diagnostics page. The request goes to an Anthropic domain, but Cloudflare answers it itself, and it carries no cookies, tokens or account information. It is used because Claude Code talks to the same host, so proxy rules route the two alike.
 
 `claude -p /usage`, for quota, runs when the panel opens, and with automatic scheduling on also every 10 minutes in the background, at most every 5 minutes per account.
 
-Proxy rules may route these probes differently from Claude's own requests, so the exit IP is a hint, not proof.
+A proxy that routes by process or balances load may still send the probe and Claude out differently, so the exit IP is a hint, not proof.
 
 ## Data and privacy
 

@@ -39,8 +39,19 @@ type Reader struct {
 }
 
 func New(s *store.Store) *Reader {
-	return &Reader{Store: s, Client: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, lastRun: map[string]time.Time{}, lastError: map[string]string{}}
+	// A kept connection stays on the route it opened on and would hide a change of proxy node.
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DisableKeepAlives = true
+	return &Reader{Store: s, Client: &http.Client{Transport: t, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, lastRun: map[string]time.Time{}, lastError: map[string]string{}}
 }
+
+const (
+	// traceURL is Cloudflare's diagnostics page on the host Claude Code talks to, so a
+	// proxy routes it as it routes Claude. Cloudflare answers it itself. It is the one
+	// request CCRouter sends to an Anthropic domain and carries nothing about any account.
+	traceURL = "https://api.anthropic.com/cdn-cgi/trace"
+	ipFresh  = time.Minute // a probe this young serves the panel as it opens; a refresh always probes
+)
 
 // Exit is the probed egress address. Country is a best-effort ISO 3166-1 code.
 type Exit struct {
@@ -49,7 +60,7 @@ type Exit struct {
 }
 
 func (r *Reader) IP(ctx context.Context, force bool) (Exit, time.Time, error) {
-	if b, t, e := r.Store.Snapshot("ip"); e == nil && !force && time.Since(t) < 15*time.Minute {
+	if b, t, e := r.Store.Snapshot("ip"); e == nil && !force && time.Since(t) < ipFresh {
 		var x Exit
 		// Snapshots written before country lookup hold the bare address.
 		if json.Unmarshal(b, &x) != nil {
@@ -59,7 +70,7 @@ func (r *Reader) IP(ctx context.Context, force bool) (Exit, time.Time, error) {
 			return x, t, nil
 		}
 	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org?format=json", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, traceURL, nil)
 	res, e := r.Client.Do(req)
 	if e != nil {
 		return Exit{}, time.Time{}, errors.New("出口 IP 暂时无法查询")
@@ -68,13 +79,14 @@ func (r *Reader) IP(ctx context.Context, force bool) (Exit, time.Time, error) {
 	if res.StatusCode != 200 {
 		return Exit{}, time.Time{}, fmt.Errorf("IP 查询 HTTP %d", res.StatusCode)
 	}
-	var v struct {
-		IP string `json:"ip"`
+	body, e := io.ReadAll(io.LimitReader(res.Body, 4096))
+	if e != nil {
+		return Exit{}, time.Time{}, errors.New("出口 IP 暂时无法查询")
 	}
-	if e = json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&v); e != nil || net.ParseIP(v.IP) == nil {
+	x := trace(string(body))
+	if net.ParseIP(x.IP) == nil {
 		return Exit{}, time.Time{}, errors.New("IP 查询返回无效地址")
 	}
-	x := Exit{IP: v.IP, Country: r.country(ctx, v.IP)}
 	b, _ := json.Marshal(x)
 	if e = r.Store.SaveSnapshot("ip", b); e != nil {
 		return Exit{}, time.Time{}, e
@@ -82,22 +94,18 @@ func (r *Reader) IP(ctx context.Context, force bool) (Exit, time.Time, error) {
 	return x, time.Now(), nil
 }
 
-// country looks up the probed address itself, so the result describes that IP even if
-// this request takes a different route. Failure only hides the country.
-func (r *Reader) country(ctx context.Context, ip string) string {
-	req, e := http.NewRequestWithContext(ctx, http.MethodGet, "https://ipinfo.io/"+ip+"/country", nil)
-	if e != nil {
-		return ""
+// trace reads the address and country from Cloudflare's key=value lines. A country that
+// is not a plain two-letter code, such as T1 for Tor, is left out.
+func trace(body string) Exit {
+	var x Exit
+	for _, line := range strings.Split(body, "\n") {
+		k, v, _ := strings.Cut(strings.TrimSpace(line), "=")
+		switch {
+		case k == "ip":
+			x.IP = v
+		case k == "loc" && len(v) == 2 && v[0] >= 'A' && v[0] <= 'Z' && v[1] >= 'A' && v[1] <= 'Z':
+			x.Country = v
+		}
 	}
-	res, e := r.Client.Do(req)
-	if e != nil {
-		return ""
-	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 16))
-	code := strings.TrimSpace(string(b))
-	if res.StatusCode != 200 || len(code) != 2 || code[0] < 'A' || code[0] > 'Z' || code[1] < 'A' || code[1] > 'Z' {
-		return ""
-	}
-	return code
+	return x
 }

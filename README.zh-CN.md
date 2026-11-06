@@ -223,7 +223,7 @@ third_party/darwinkit/  固定版本的 DarwinKit 及兼容性修复
 
 ## 声明
 
-CCRouter 是独立项目，与 Anthropic 没有关联，也未获其认可。Claude 和 Claude Code 是 Anthropic 的商标。CCRouter 不会为了绕开用量限制而轮换账户，请按各账户所属套餐的条款使用。
+CCRouter 是独立项目，与 Anthropic 没有关联，也未获其认可。Claude 和 Claude Code 是 Anthropic 的商标。CCRouter 默认不会自动换账户。自动调度是默认关闭的可选功能，开启前请自行确认它符合各账户所属套餐的条款。
 
 ## 致谢
 

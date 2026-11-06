@@ -223,7 +223,7 @@ The interface calls AppKit through [DarwinKit](https://github.com/progrium/darwi
 
 ## Disclaimer
 
-CCRouter is an independent project. It is not affiliated with or endorsed by Anthropic. Claude and Claude Code are trademarks of Anthropic. CCRouter doesn't rotate accounts to get around usage limits. Use each account in line with the terms of its plan.
+CCRouter is an independent project. It is not affiliated with or endorsed by Anthropic. Claude and Claude Code are trademarks of Anthropic. CCRouter doesn't change accounts on its own by default. Automatic scheduling is optional and off until you turn it on; before you do, check that it fits the terms of each account's plan.
 
 ## Acknowledgement
 

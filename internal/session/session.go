@@ -257,6 +257,9 @@ func prepare(s *store.Store, account, target string, args []string, cwd string) 
 	// Sharing lets this account resume conversations from the others. A profile that
 	// cannot share yet still launches; only switching needs it.
 	p.Unshared = usage.Share(a.Profile)
+	// One session registry lets this account's sessions and the others' message each
+	// other. It waits until no Claude of the account runs; nothing else depends on it.
+	_ = usage.ShareRegistry(a.Profile)
 	if target != "" {
 		if e = handOff(s, from, a, source); e != nil {
 			return p, e

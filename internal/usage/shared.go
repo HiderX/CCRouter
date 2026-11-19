@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -153,17 +155,91 @@ func same(a, b string) bool {
 	return filepath.Clean(a) == filepath.Clean(b)
 }
 
+// registryDir is where each running Claude records itself: its conversation, working
+// directory and messaging socket. Claude finds the sessions it can message there.
+const registryDir = "sessions"
+
+// registrySupported is whether a process's config directory can be read here, which
+// telling accounts apart in a shared registry needs.
+const registrySupported = runtime.GOOS == "darwin" || runtime.GOOS == "linux"
+
+// ShareRegistry links profile's session registry to the hub's, so the sessions of every
+// account can find and message each other. Switching conversations does not need it, so
+// callers may ignore its error. It waits, with an error, while any process still keeps
+// a record there; with none, the records left are stale and are dropped, as Claude itself
+// would.
+func ShareRegistry(profile string) error {
+	hub := Hub()
+	if !registrySupported || same(profile, hub) {
+		return nil
+	}
+	p, h := filepath.Join(profile, registryDir), filepath.Join(hub, registryDir)
+	if t, e := os.Readlink(p); e == nil {
+		if !same(t, h) {
+			return fmt.Errorf("%s 已链接到 %s", p, t)
+		}
+		return nil
+	}
+	if e := os.MkdirAll(h, 0700); e != nil {
+		return e
+	}
+	es, e := os.ReadDir(p)
+	if e != nil && !errors.Is(e, os.ErrNotExist) {
+		return e
+	}
+	// A process without a conversation, such as a background host, also keeps a record.
+	for _, en := range es {
+		if pid, ok := recordPID(en.Name()); ok && alive(pid) {
+			return fmt.Errorf("进程 %d 仍在使用 %s；它退出后，下次用 ccrouter 启动时自动共享会话登记", pid, p)
+		}
+	}
+	for _, en := range es {
+		if e = os.RemoveAll(filepath.Join(p, en.Name())); e != nil {
+			return e
+		}
+	}
+	if e = os.Remove(p); e != nil && !errors.Is(e, os.ErrNotExist) {
+		return e
+	}
+	return os.Symlink(h, p)
+}
+
+// recordPID reads the process ID a registry file is named for: <pid>.json, or
+// <pid>.<hash>.key for its messaging key.
+func recordPID(name string) (int, bool) {
+	head, _, _ := strings.Cut(name, ".")
+	pid, e := strconv.Atoi(head)
+	return pid, e == nil && pid > 0
+}
+
 // process is a running Claude, as its registry entry names it.
 type process struct {
 	SessionID string `json:"sessionId"`
 	CWD       string `json:"cwd"`
 }
 
-// running lists the Claude processes of profile that are alive now, from the registry
-// each process keeps under the profile. That directory is not shared, so it tells which
-// account a conversation is running under.
+// configDirOf names the config directory a Claude process runs with: CLAUDE_CONFIG_DIR,
+// or ~/.claude without it. ok is false when the process's environment cannot be read.
+var configDirOf = func(pid int) (dir string, ok bool) {
+	v, found, e := processEnv(pid, "CLAUDE_CONFIG_DIR")
+	switch {
+	case e != nil:
+		return "", false
+	case !found || v == "":
+		return Hub(), true
+	}
+	return v, true
+}
+
+// running lists the Claude processes of profile that are alive now. A profile whose
+// registry is still its own folder holds only its own processes. A shared registry, the
+// hub's, holds every account's, so each process is attributed by its own config
+// directory; that is how CCRouter tells which account runs a conversation.
 func running(profile string) []process {
-	files, _ := filepath.Glob(filepath.Join(profile, "sessions", "*.json"))
+	dir := filepath.Join(profile, registryDir)
+	fi, e := os.Lstat(dir)
+	own := e == nil && fi.IsDir() && !same(profile, Hub())
+	files, _ := filepath.Glob(filepath.Join(dir, "*.json"))
 	var out []process
 	for _, f := range files {
 		b, e := os.ReadFile(f)
@@ -174,9 +250,15 @@ func running(profile string) []process {
 			PID int `json:"pid"`
 			process
 		}
-		if json.Unmarshal(b, &v) == nil && v.SessionID != "" && alive(v.PID) {
-			out = append(out, v.process)
+		if json.Unmarshal(b, &v) != nil || v.SessionID == "" || !alive(v.PID) {
+			continue
 		}
+		if !own {
+			if d, ok := configDirOf(v.PID); ok && !same(d, profile) {
+				continue
+			}
+		}
+		out = append(out, v.process)
 	}
 	return out
 }

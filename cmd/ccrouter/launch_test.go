@@ -111,3 +111,51 @@ func TestDecide(t *testing.T) {
 		t.Fatal(notice, account, assigned)
 	}
 }
+
+func TestResumeChoices(t *testing.T) {
+	now := time.Now()
+	soon := now.Add(time.Hour)
+	cachedQuota = func(a store.Account) status.Result {
+		if a.ID == "c" {
+			return status.Result{} // no reading yet
+		}
+		return status.Result{Quota: status.Quota{FiveHour: &status.Window{Utilization: 33, ResetsAt: &soon}, SevenDay: &status.Window{Utilization: 9}}, Updated: now}
+	}
+	loggedIn = func(p string) bool { return p != "/c" }
+	t.Cleanup(func() { cachedQuota, loggedIn = status.Cached, session.LoggedIn })
+	as := []store.Account{{ID: "a", Name: "A", Profile: "/a"}, {ID: "b", Name: "B", Profile: "/b"}, {ID: "c", Name: "C", Profile: "/c"}}
+	v := store.Session{ID: "550e8400-e29b-41d4-a716-446655440000", AccountID: "b", CWD: "/p"}
+
+	items, selected, title := resumeChoices(as, v, "", now)
+	if selected != 1 || items[1].Detail != "上次使用 · 5 小时 33% · 本周 9%" || title != "这个对话" {
+		t.Fatalf("keep: selected %d, %q, %q", selected, items[1].Detail, title)
+	}
+	if items[2].Detail != "未登录" || !items[2].Dim || items[0].Detail != "5 小时 33% · 本周 9%" {
+		t.Fatalf("other rows: %+v", items)
+	}
+	if _, selected, _ = resumeChoices(as, v, "a", now); selected != 0 {
+		t.Fatal("the scheduler's suggestion should be preselected")
+	}
+	if items, _, _ = resumeChoices(as, v, "a", now); items[0].Detail != "自动调度推荐 · 5 小时 33% · 本周 9%" {
+		t.Fatal(items[0].Detail)
+	}
+}
+
+func TestNewChoices(t *testing.T) {
+	now := time.Now()
+	cachedQuota = func(a store.Account) status.Result {
+		return status.Result{Quota: status.Quota{FiveHour: &status.Window{Utilization: 12}, SevenDay: &status.Window{Utilization: 5}}, Updated: now}
+	}
+	loggedIn = func(string) bool { return true }
+	t.Cleanup(func() { cachedQuota, loggedIn = status.Cached, session.LoggedIn })
+	as := []store.Account{{ID: "a", Name: "A", Email: "a@x"}, {ID: "b", Name: "B", Default: true}}
+
+	items, selected := newChoices(as, "", now)
+	if selected != 1 || items[1].Detail != "默认 · 5 小时 12% · 本周 5%" || items[0].Detail != "a@x · 5 小时 12% · 本周 5%" {
+		t.Fatalf("manual: %d %+v", selected, items)
+	}
+	items, selected = newChoices(as, "a", now)
+	if selected != 0 || items[0].Detail != "a@x · 自动调度推荐 · 5 小时 12% · 本周 5%" {
+		t.Fatalf("auto: %d %+v", selected, items)
+	}
+}

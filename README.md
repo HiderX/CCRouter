@@ -19,7 +19,7 @@ There is no proxy. CCRouter chooses the account's config directory and hands the
 
 - **Nothing in the request path.** CCRouter never relays model traffic or sees your prompts. It sets up the environment, then replaces itself with `claude` (`exec`). Your requests, streaming and errors are exactly what the official CLI produces.
 - **Every account request comes from Claude Code.** CCRouter has no client for the Anthropic API and never reads OAuth tokens. Quota is asked of Claude Code itself (`claude -p /usage`, a local command with no model turn). The only request CCRouter sends to an Anthropic domain is the anonymous exit IP probe described under [Network requests](#network-requests).
-- **Conversations stay on their account.** Each conversation ID is bound to one account. Resuming always uses that account, even after you change the default, so you don't lose the prompt cache or end up with a history split across accounts. A resume on a different account is refused.
+- **Conversations stay on their account.** Each conversation ID is bound to one account. Resuming offers that account first, even after you change the default, so you don't lose the prompt cache or end up with a history split across accounts by accident. Moving it to another account is always an explicit choice.
 - **Light on your machine.** No per-conversation helper process, no polling, no Electron or WebView. See the [measurements](#resource-usage).
 - **Usage and quota at a glance.** Tokens for today, the last 7 days or all time, per account and in total, with cache hit rate and a one-hour trend. The 5-hour and weekly quota windows for every account, and the exit IP you're probing from.
 - **Private by design.** The local database stores no tokens, prompts or conversation text. Conversation titles in the resume list are read from Claude's own transcripts when you open the list, and never saved.
@@ -84,7 +84,7 @@ A local build is signed ad hoc, which is enough on the Mac that built it, and th
 
 1. **Add accounts.** In the menu bar panel, click 添加账户 (Add account), name it, and finish the official Claude login in Terminal. Each account added this way gets its own config directory. To register the login you already have in `~/.claude`, use 导入当前 Claude 账户 (Import current Claude account) in the gear menu.
 2. **Start a conversation.** Run `ccrouter` in a project folder. Choose an account. The default one is preselected, so pressing Enter is enough. Claude starts as usual.
-3. **Come back later.** Run `ccrouter --resume` anywhere. Pick a conversation from any account, or type to filter. CCRouter changes to that conversation's project folder and resumes it on its own account.
+3. **Come back later.** Run `ccrouter --resume` anywhere. Pick a conversation from any account, or type to filter. CCRouter then asks which account continues it, with the one it last ran on preselected, so Enter keeps it. It changes to that conversation's project folder and resumes it.
 
 ## Terminal usage
 
@@ -100,7 +100,9 @@ ccrouter --model opus "fix login" # everything else goes to claude unchanged
 
 The account list shows each account's email and marks the default and any account that isn't logged in. Use the arrow keys or type the number. The conversation list shows each conversation's title, project, last activity and account. Titles are the ones Claude generates, or the first prompt when there is none.
 
-With automatic scheduling on (see Automatic scheduling under [How it works](#how-it-works)), a new conversation doesn't ask for an account: the strategy picks one, and the launcher says which and why. `--account` still chooses directly.
+Resuming (`--resume`, with or without an ID, and `-c`) then asks which account continues the conversation. Each account shows its current quota; the one the conversation last ran on is marked 上次使用 (last used) and preselected. Picking another account switches the conversation to it, and the prompt cache starts cold. With automatic scheduling, when the conversation's account has reached its threshold, the scheduler's pick is marked 自动调度推荐 (suggested) and preselected instead. `--account` or `--switch-account` skips the question.
+
+With automatic scheduling on (see Automatic scheduling under [How it works](#how-it-works)), the account list for a new conversation preselects the strategy's pick, marked 自动调度推荐 (suggested), so Enter takes it and the launcher says why. Each account shows its current quota, and you can pick any other. In scripts and pipes the strategy picks without asking. `--account` still chooses directly.
 
 The lists only appear in an interactive terminal. In scripts, pipes and `-p` (print) mode, a new conversation uses the default account (or the strategy's pick, with automatic scheduling), and `--resume` needs a full conversation ID. Claude's own management commands, such as `mcp`, `doctor` and `update`, don't go through CCRouter. Run them with `claude`.
 

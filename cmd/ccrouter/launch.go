@@ -49,12 +49,18 @@ func launch(s *store.Store, args []string) error {
 		}
 		rest = append(append(append([]string{}, rest[:from]...), "--resume", v.ID), rest[to:]...)
 		cwd = v.CWD
-	} else if interactive && account == "" && !has(rest, "-c", "--continue", "-r", "--resume", "--from-pr") && !schedule.Load(s).Auto() {
-		a, e := chooseAccount(s)
-		if e != nil {
-			return e
+	}
+	if interactive && account == "" && target == "" {
+		if v, ok := session.Resuming(s, rest, cwd); ok {
+			// A resumed conversation names its account, and the user may move it to another.
+			if account, target, e = chooseResumeAccount(s, v); e != nil {
+				return e
+			}
+		} else if !has(rest, "-c", "--continue", "-r", "--resume", "--from-pr") {
+			if account, e = chooseAccount(s); e != nil {
+				return e
+			}
 		}
-		account = a.ID
 	}
 	return start(s, account, target, rest, cwd)
 }
@@ -209,39 +215,137 @@ func resumeWithoutID(args []string) (from, to int, query string, ok bool) {
 	return 0, 0, "", false
 }
 
-func chooseAccount(s *store.Store) (store.Account, error) {
+// chooseAccount asks which account a new conversation uses. The default account is
+// preselected; in automatic mode, the scheduler's pick is preselected instead. It returns
+// the chosen account, or nothing when the scheduler's own choice stands.
+func chooseAccount(s *store.Store) (string, error) {
 	as, e := s.Accounts()
+	switch {
+	case e != nil:
+		return "", e
+	case len(as) == 0:
+		return "", errors.New("还没有账户；运行 ccrouter account add 名称，或 ccrouter account import 登记当前 Claude 登录")
+	}
+	c := schedule.Load(s)
+	if len(as) == 1 {
+		if c.Auto() {
+			return "", nil // the scheduler still has its say about the one account
+		}
+		return as[0].ID, nil
+	}
+	now := time.Now()
+	suggest := ""
+	if c.Auto() {
+		if to := c.Pick(c.Plan(), states(s), schedule.Last(s), "", now); to.OK() {
+			suggest = to.Account.ID
+		}
+	}
+	items, selected := newChoices(as, suggest, now)
+	i, e := pick.Run(items, pick.Options{Title: "新对话使用哪个账户", Selected: selected})
 	if e != nil {
-		return store.Account{}, e
+		return "", e
 	}
-	switch len(as) {
-	case 0:
-		return store.Account{}, errors.New("还没有账户；运行 ccrouter account add 名称，或 ccrouter account import 登记当前 Claude 登录")
-	case 1:
-		return as[0], nil
+	if as[i].ID == suggest {
+		return "", nil // the scheduler assigns it, says why, and keeps its rotation
 	}
-	items, selected := make([]pick.Item, len(as)), 0
+	fmt.Fprintf(os.Stderr, "CCRouter · 使用「%s」\n", as[i].Name)
+	return as[i].ID, nil
+}
+
+// newChoices lists the accounts for chooseAccount, with the one to preselect.
+func newChoices(as []store.Account, suggest string, now time.Time) (items []pick.Item, selected int) {
+	items = make([]pick.Item, len(as))
 	for i, a := range as {
 		var tags []string
 		if a.Email != "" {
 			tags = append(tags, a.Email)
 		}
 		if a.Default {
-			selected = i
 			tags = append(tags, "默认")
+			if suggest == "" {
+				selected = i
+			}
 		}
-		in := session.LoggedIn(a.Profile)
+		if a.ID == suggest {
+			tags = append(tags, "自动调度推荐")
+			selected = i
+		}
+		if q := cachedQuota(a); !q.Updated.IsZero() {
+			tags = append(tags, quotaLine(q.Quota, now))
+		}
+		in := loggedIn(a.Profile)
 		if !in {
 			tags = append(tags, "未登录")
 		}
 		items[i] = pick.Item{Label: a.Name, Detail: strings.Join(tags, " · "), Dim: !in}
 	}
-	i, e := pick.Run(items, pick.Options{Title: "新对话使用哪个账户", Selected: selected})
-	if e != nil {
-		return store.Account{}, e
+	return items, selected
+}
+
+// chooseResumeAccount asks which account continues conversation v. The account it last ran
+// on is preselected, so Enter keeps it; in automatic mode, an account the scheduler would
+// move it to is preselected instead. It returns the account to keep or the switch target,
+// and nothing when the scheduler's own choice stands.
+func chooseResumeAccount(s *store.Store, v store.Session) (account, target string, err error) {
+	as, e := s.Accounts()
+	if e != nil || len(as) < 2 {
+		return "", "", e
 	}
-	fmt.Fprintf(os.Stderr, "CCRouter · 使用「%s」\n", as[i].Name)
-	return as[i], nil
+	now := time.Now()
+	suggest := ""
+	if c := schedule.Load(s); c.Auto() {
+		if to, ok := c.Resume(states(s), v.AccountID, schedule.Last(s), now); ok {
+			suggest = to.Account.ID
+		}
+	}
+	items, selected, title := resumeChoices(as, v, suggest, now)
+	i, e := pick.Run(items, pick.Options{Title: "继续" + title + "用哪个账户（换号需重建缓存）", Selected: selected})
+	if e != nil {
+		return "", "", e
+	}
+	switch to := as[i]; to.ID {
+	case v.AccountID:
+		fmt.Fprintf(os.Stderr, "CCRouter · 继续使用「%s」\n", to.Name)
+		return to.ID, "", nil // an explicit choice; the scheduler does not move it
+	case suggest:
+		return "", "", nil // the scheduler switches it, and says why
+	default:
+		return "", to.ID, nil
+	}
+}
+
+// resumeChoices lists the accounts for chooseResumeAccount, with the one to preselect and
+// the picker's title.
+func resumeChoices(as []store.Account, v store.Session, suggest string, now time.Time) (items []pick.Item, selected int, title string) {
+	items = make([]pick.Item, len(as))
+	for i, a := range as {
+		var tags []string
+		switch a.ID {
+		case v.AccountID:
+			tags = append(tags, "上次使用")
+			title = usage.Title(a.Profile, v.CWD, v.ID)
+			if suggest == "" {
+				selected = i
+			}
+		case suggest:
+			tags = append(tags, "自动调度推荐")
+			selected = i
+		}
+		if q := cachedQuota(a); !q.Updated.IsZero() {
+			tags = append(tags, quotaLine(q.Quota, now))
+		}
+		in := loggedIn(a.Profile)
+		if !in {
+			tags = append(tags, "未登录")
+		}
+		items[i] = pick.Item{Label: a.Name, Detail: strings.Join(tags, " · "), Dim: !in}
+	}
+	if title == "" {
+		title = "这个对话"
+	} else {
+		title = "「" + title + "」"
+	}
+	return items, selected, title
 }
 
 func chooseSession(s *store.Store, account, query string) (store.Session, error) {
